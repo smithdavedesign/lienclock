@@ -1,0 +1,25 @@
+{
+  "title": "lienclock — lien and preliminary-notice deadline tracker for small subcontractors",
+  "repoName": "lienclock",
+  "oneLiner": "For owners of small specialty subcontractors working across states, it computes each job's preliminary-notice and lien-filing deadlines and alerts them before they lapse, at a flat price instead of $19 per notice or $149/month platforms.",
+  "overlaps": "none",
+  "tags": [
+    "construction",
+    "compliance"
+  ],
+  "effort": "Medium",
+  "confidence": "Low",
+  "sources": [
+    "https://www.siteline.com/blog/mechanics-lien-myths-that-could-cost-subcontractors-their-rights",
+    "https://www.siteline.com/blog/the-best-mechanics-lien-rights-management-software-for-subcontractors",
+    "https://cafe.cfma.org/discussion/anyone-else-tripping-over-mechanics-lien-rulesprocess",
+    "https://www.capterra.com/p/10039699/LienDeadline/",
+    "https://www.capterra.com/p/10045597/liendone/",
+    "https://www.siteline.com/blog/recent-mechanics-lien-law-changes-every-subcontractor-should-know",
+    "https://www.trustradius.com/products/levelset/pricing",
+    "https://www.softwareadvice.com/cms/zlien-profile/reviews/",
+    "https://www.prelien.co/tools"
+  ],
+  "slug": "lienclock",
+  "recordedAt": "2026-10-11T18:36:24.839Z"
+}
