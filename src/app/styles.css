@@ -1,0 +1,272 @@
+:root {
+  --ink: #1d2433;
+  --muted: #5b6475;
+  --line: #d9dee7;
+  --accent: #1f5fbf;
+  --ok: #1b7a3d;
+  --warn: #a35b00;
+  --bad: #b3261e;
+  font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+  color: var(--ink);
+  line-height: 1.45;
+}
+
+body {
+  margin: 0;
+}
+
+header,
+main,
+footer {
+  max-width: 64rem;
+  margin: 0 auto;
+  padding: 1rem;
+}
+
+header {
+  display: flex;
+  gap: 1rem;
+  align-items: baseline;
+  border-bottom: 1px solid var(--line);
+}
+
+.brand {
+  font-weight: 700;
+  font-size: 1.25rem;
+  color: var(--ink);
+  text-decoration: none;
+}
+
+footer {
+  color: var(--muted);
+  font-size: 0.85rem;
+  border-top: 1px solid var(--line);
+  margin-top: 2rem;
+}
+
+.lede {
+  color: var(--muted);
+  max-width: 44rem;
+}
+
+.job-form,
+.danger {
+  display: grid;
+  gap: 0.75rem;
+  max-width: 32rem;
+  margin: 1.5rem 0;
+}
+
+.fields {
+  display: grid;
+  gap: 0.75rem;
+}
+
+label {
+  display: grid;
+  gap: 0.25rem;
+  font-weight: 600;
+}
+
+input,
+select,
+button {
+  font: inherit;
+  padding: 0.45rem 0.6rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+button {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+  cursor: pointer;
+  justify-self: start;
+}
+
+.danger button {
+  background: #fff;
+  color: var(--bad);
+  border-color: var(--bad);
+}
+
+fieldset.save {
+  display: grid;
+  gap: 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.scope,
+.note,
+.pending,
+.hint,
+.source {
+  color: var(--muted);
+  font-size: 0.9rem;
+  font-weight: 400;
+}
+
+.error {
+  color: var(--bad);
+  font-weight: 400;
+}
+
+.flash {
+  background: #eef6ee;
+  padding: 0.5rem 0.75rem;
+  border-radius: 6px;
+}
+
+table.deadlines {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 1rem 0;
+}
+
+.deadlines th,
+.deadlines td {
+  text-align: left;
+  vertical-align: top;
+  padding: 0.6rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.deadlines .note {
+  margin: 0.25rem 0 0;
+}
+
+.badge {
+  display: inline-block;
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #fff;
+  white-space: nowrap;
+}
+
+/* A date never breaks at its hyphens ("2026-11-" / "15"). */
+.deadlines time {
+  white-space: nowrap;
+}
+
+.badge-protected {
+  background: var(--ok);
+}
+
+.badge-partial {
+  background: var(--warn);
+}
+
+.badge-at_risk {
+  background: var(--accent);
+}
+
+.badge-missed {
+  background: var(--bad);
+}
+
+/* Intake review: values read from an email stay flagged until the user confirms them. */
+.badge-unconfirmed {
+  background: var(--warn);
+}
+
+.badge-missing {
+  background: var(--muted);
+}
+
+.flag {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  align-items: baseline;
+  font-weight: 400;
+}
+
+header nav {
+  margin-left: auto;
+}
+
+.account {
+  display: flex;
+  gap: 1rem;
+  align-items: center;
+  justify-content: flex-end;
+  color: var(--muted);
+}
+
+/* The sign-out form keeps its button on one line next to a long address. */
+.account form {
+  flex-shrink: 0;
+}
+
+textarea,
+input.copy {
+  font: inherit;
+  padding: 0.45rem 0.6rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+code {
+  background: #f3f5f9;
+  padding: 0.1rem 0.3rem;
+  border-radius: 4px;
+  word-break: break-all;
+}
+
+.protection {
+  font-size: 0.85rem;
+  margin: 0.25rem 0 0;
+}
+
+form.inline {
+  display: flex;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+}
+
+@media (max-width: 640px) {
+  /* Brand and "Your jobs" on one line, the tagline under them. */
+  header {
+    flex-wrap: wrap;
+  }
+
+  header > span {
+    order: 1;
+    flex-basis: 100%;
+    color: var(--muted);
+    font-size: 0.9rem;
+  }
+
+  /* Tables become one card per row: no column headers, so each value carries its own label. */
+  .deadlines thead {
+    display: none;
+  }
+
+  .deadlines tr,
+  .deadlines td {
+    display: block;
+  }
+
+  .deadlines tr {
+    border-bottom: 2px solid var(--line);
+    padding: 0.5rem 0;
+  }
+
+  .deadlines td {
+    border-bottom: 0;
+    padding: 0.2rem 0;
+  }
+
+  .deadlines td[data-label]::before {
+    content: attr(data-label) ': ';
+    color: var(--muted);
+    font-size: 0.85rem;
+    font-weight: 600;
+  }
+}
