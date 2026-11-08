@@ -1,5 +1,5 @@
 // computeDeadlines(job): every preliminary-notice and lien deadline for a job, with status.
-import { addDays, addMonthsOnDay, daysBetween, isIsoDate, monthLabel, monthsBetween, todayIn } from './dates';
+import { addDays, addMonths, addMonthsOnDay, daysBetween, isIsoDate, monthLabel, monthsBetween, todayIn } from './dates';
 import {
   PROJECT_TYPES,
   ROLES,
@@ -84,9 +84,15 @@ export function assertValidJob(job: JobInput): void {
 }
 
 function applyOffset(rule: Rule, from: string): string {
-  return rule.offset.unit === 'days'
-    ? addDays(from, rule.offset.days)
-    : addMonthsOnDay(from, rule.offset.months, rule.offset.day);
+  const { offset } = rule;
+  switch (offset.unit) {
+    case 'days':
+      return addDays(from, offset.days);
+    case 'monthDay':
+      return addMonthsOnDay(from, offset.months, offset.day);
+    case 'months':
+      return addDays(addMonths(from, offset.months), offset.days);
+  }
 }
 
 interface Occurrence {

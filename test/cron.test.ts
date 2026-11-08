@@ -63,6 +63,8 @@ describe('handleCronRequest', () => {
       sent: 0,
       retrying: 0,
       failed: 0,
+      // M3: the run first records rule changes (here the states added since the baseline, with no jobs).
+      ruleChanges: { ok: true, created: expect.any(Number), emailsQueued: 0, sent: 0, retrying: 0, failed: 0 },
     });
     const { rows } = await db.query('SELECT status FROM alerts');
     expect(rows).toEqual([{ status: 'pending' }]);

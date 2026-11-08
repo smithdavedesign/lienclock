@@ -3,6 +3,7 @@ import { SIGN_IN_LINK_MINUTES, peekSignIn, safeNextPath } from '@/lib/auth';
 import { getDb } from '@/lib/db';
 import { STATES, isSupportedState } from '@/lib/rules';
 import { finishSignInAction, requestSignInAction } from '../actions';
+import { Agreement } from '../Legal';
 
 export const metadata: Metadata = { title: 'Sign in — LienClock', robots: { index: false, follow: false } };
 
@@ -44,6 +45,7 @@ export default async function SignInPage({ searchParams }: { searchParams: Searc
         <form action={finishSignInAction} className="job-form">
           <input type="hidden" name="token" value={token} />
           <button type="submit">Sign in to LienClock</button>
+          <Agreement by="signing in" />
         </form>
       </>
     );
@@ -79,6 +81,7 @@ export default async function SignInPage({ searchParams }: { searchParams: Searc
           <input type="email" name="email" autoComplete="email" maxLength={254} required />
         </label>
         <button type="submit">Email me a sign-in link</button>
+        <Agreement by="continuing" />
       </form>
     </>
   );

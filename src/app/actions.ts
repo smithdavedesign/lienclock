@@ -5,6 +5,8 @@
 // job and proposal writes are scoped to the signed-in account in SQL.
 import { redirect } from 'next/navigation';
 import {
+  JOB_LIMIT_PATH,
+  deleteAccount,
   deliverSignInLink,
   endSession,
   finishSignIn,
@@ -13,12 +15,22 @@ import {
   startSignIn,
   type PendingJob,
 } from '@/lib/auth';
+import { isPaid, jobLimitFor } from '@/lib/billing';
 import { isIsoDate, todayIn } from '@/lib/dates';
 import { getDb, type Db } from '@/lib/db';
 import { confirmProposal, createProposal, discardProposal } from '@/lib/inbound';
 import { proposeJobFromEmail } from '@/lib/intake';
 import { parseDoneDate, parseJobForm, type JobForm } from '@/lib/jobInput';
-import { createJob, deleteJob, getJob, isJobId, markDeadlineDone, setLastFurnish } from '@/lib/jobs';
+import {
+  JobLimitReached,
+  createJob,
+  deleteJob,
+  getJob,
+  isJobId,
+  markDeadlineDone,
+  setLastFurnish,
+  type StoredJob,
+} from '@/lib/jobs';
 import { STATES } from '@/lib/rules';
 import { clearSessionCookie, currentAccount, requireAccount, sessionToken, setSessionCookie } from './session';
 
@@ -70,7 +82,16 @@ export async function saveJob(formData: FormData): Promise<void> {
   const db = await getDb();
   if (account) {
     // Alerts only ever go to the verified account address.
-    const saved = await createJob(db, { ...job, alertEmail: account.email, accountId: account.id });
+    let saved: StoredJob;
+    try {
+      saved = await createJob(db, { ...job, alertEmail: account.email, accountId: account.id }, { jobLimit: jobLimitFor(account, process.env) });
+    } catch (error) {
+      if (!(error instanceof JobLimitReached)) throw error;
+      // Back to the calculator with the job still filled in, and a way to subscribe.
+      const back = jobQuery(form);
+      back.set('limit', '1');
+      redirect(`/?${back}`);
+    }
     redirect(`/jobs/${saved.id}`);
   }
   // Signed out: saving is signing up. The job waits in the link until the address is confirmed.
@@ -82,10 +103,23 @@ export async function requestSignInAction(formData: FormData): Promise<void> {
 }
 
 export async function finishSignInAction(formData: FormData): Promise<void> {
-  const result = await finishSignIn(await getDb(), text(formData, 'token'), { now: new Date() });
+  const result = await finishSignIn(await getDb(), text(formData, 'token'), {
+    now: new Date(),
+    jobLimit: (account) => jobLimitFor(account, process.env),
+  });
   if (!result.ok) redirect('/signin?error=expired');
   await setSessionCookie(result.sessionToken);
   redirect(result.next);
+}
+
+export async function deleteAccountAction(formData: FormData): Promise<void> {
+  const account = await requireAccount('/jobs');
+  // Deleting the account can't stop Stripe from charging, so the subscription must go first.
+  if (isPaid(account.subscriptionStatus)) redirect('/jobs?error=delete-subscribed#account');
+  if (text(formData, 'confirm') !== 'yes') redirect('/jobs?error=delete-confirm#account');
+  await deleteAccount(await getDb(), account.id);
+  await clearSessionCookie();
+  redirect('/?accountDeleted=1');
 }
 
 export async function signOutAction(): Promise<void> {
@@ -163,9 +197,10 @@ export async function confirmProposalAction(formData: FormData): Promise<void> {
   const id = proposalIdFrom(formData);
   const account = await requireAccount(`/intake/${id}`);
   const form = jobForm(formData);
-  const result = await confirmProposal(await getDb(), account, id, form);
+  const result = await confirmProposal(await getDb(), account, id, form, { jobLimit: jobLimitFor(account, process.env) });
   if (result.ok) redirect(`/jobs/${result.job.id}`);
   if (result.reason === 'invalid') redirect(`/intake/${id}?invalid=1&${jobQuery(form)}`);
+  if (result.reason === 'limit') redirect(JOB_LIMIT_PATH);
   redirect('/jobs');
 }
 

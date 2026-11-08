@@ -13,7 +13,7 @@ import { DEFAULT_FROM, appUrlFrom, type CronEnv } from './cron';
 import type { Db } from './db';
 import type { JobInput } from './deadlines';
 import { parseEmail } from './jobInput';
-import { createJob, isJobId as isUuid, type StoredJob } from './jobs';
+import { JobLimitReached, createJob, isJobId as isUuid, type StoredJob } from './jobs';
 
 export const SESSION_COOKIE = 'lc_session';
 export const SESSION_DAYS = 30;
@@ -34,6 +34,8 @@ export interface Account {
   feedToken: string;
   /** Local part of the account's email-forward address. */
   intakeToken: string;
+  /** Stripe's subscription status from the billing webhook; null if never subscribed. See billing.ts. */
+  subscriptionStatus: string | null;
 }
 
 /** The job fields held in a sign-in link until the address is confirmed. */
@@ -56,13 +58,14 @@ export function safeNextPath(raw: unknown, fallback = '/jobs'): string {
   return raw;
 }
 
-const ACCOUNT_COLUMNS = 'id::text AS id, email, feed_token, intake_token';
+const ACCOUNT_COLUMNS = 'id::text AS id, email, feed_token, intake_token, subscription_status';
 
 interface AccountRow {
   id: string;
   email: string;
   feed_token: string;
   intake_token: string;
+  subscription_status: string | null;
 }
 
 const fromRow = (row: AccountRow): Account => ({
@@ -70,6 +73,7 @@ const fromRow = (row: AccountRow): Account => ({
   email: row.email,
   feedToken: row.feed_token,
   intakeToken: row.intake_token,
+  subscriptionStatus: row.subscription_status ?? null,
 });
 
 /** One account per (lowercased) email. Safe under concurrency: the UNIQUE index decides. */
@@ -106,6 +110,26 @@ export async function rotateFeedToken(db: Db, accountId: string): Promise<Accoun
     [accountId, newSecretToken()],
   );
   return rows[0] ? fromRow(rows[0]) : null;
+}
+
+/**
+ * Deletes the account and everything it owns in one statement. The FK cascades take its sessions,
+ * jobs (and their alerts) and intake proposals. The statement also removes its unused sign-in
+ * links, the rule-change emails queued or sent to its address, and M1-era account-less jobs that
+ * still alert the same (now verified) address. False if there was no such account. It doesn't
+ * cancel a Stripe subscription: the app refuses to delete a subscribed account (billing.ts).
+ */
+export async function deleteAccount(db: Db, accountId: string): Promise<boolean> {
+  if (!isUuid(accountId)) return false;
+  const { rows } = await db.query(
+    `WITH gone AS (DELETE FROM accounts WHERE id = $1 RETURNING email),
+          links AS (DELETE FROM login_tokens WHERE email IN (SELECT email FROM gone)),
+          notices AS (DELETE FROM rule_change_emails WHERE to_email IN (SELECT email FROM gone)),
+          legacy AS (DELETE FROM jobs WHERE account_id IS NULL AND lower(alert_email) IN (SELECT email FROM gone))
+     SELECT email FROM gone`,
+    [accountId],
+  );
+  return rows.length > 0;
 }
 
 export type StartSignIn = { ok: true; token: string; email: string } | { ok: false; error: 'invalid_email' | 'rate_limited' };
@@ -180,7 +204,14 @@ export type FinishSignIn =
   | { ok: true; account: Account; sessionToken: string; next: string; job: StoredJob | null }
   | { ok: false };
 
-export async function finishSignIn(db: Db, token: string, opts: { now: Date }): Promise<FinishSignIn> {
+/** Where to send someone whose job couldn't be saved because their plan's job limit is reached. */
+export const JOB_LIMIT_PATH = '/jobs?error=job-limit#plan';
+
+export async function finishSignIn(
+  db: Db,
+  token: string,
+  opts: { now: Date; jobLimit?: (account: Account) => number | null },
+): Promise<FinishSignIn> {
   if (!isSecretToken(token)) return { ok: false };
   // Single use: only one concurrent caller can flip used_at from NULL.
   const { rows } = await db.query<{ email: string; next_path: string; pending_job: unknown }>(
@@ -196,11 +227,16 @@ export async function finishSignIn(db: Db, token: string, opts: { now: Date }): 
   const pending = pendingJobFrom(rows[0].pending_job);
   if (pending) {
     try {
-      job = await createJob(db, { ...pending, alertEmail: account.email, accountId: account.id });
+      job = await createJob(
+        db,
+        { ...pending, alertEmail: account.email, accountId: account.id },
+        { jobLimit: opts.jobLimit?.(account) ?? null },
+      );
       next = `/jobs/${job.id}`;
     } catch (error) {
-      // Signing in still works; the user can enter the job again.
-      console.error('auth: could not save the pending job:', error instanceof Error ? error.message : error);
+      // Signing in still works; the user can enter the job again (after subscribing, at the limit).
+      if (error instanceof JobLimitReached) next = JOB_LIMIT_PATH;
+      else console.error('auth: could not save the pending job:', error instanceof Error ? error.message : error);
     }
   }
   const sessionToken = await createSession(db, account.id, opts.now);
@@ -222,7 +258,7 @@ async function createSession(db: Db, accountId: string, now: Date): Promise<stri
 export async function getSessionAccount(db: Db, token: string, opts: { now: Date }): Promise<Account | null> {
   if (!isSecretToken(token)) return null;
   const { rows } = await db.query<AccountRow>(
-    `SELECT a.id::text AS id, a.email, a.feed_token, a.intake_token
+    `SELECT a.id::text AS id, a.email, a.feed_token, a.intake_token, a.subscription_status
        FROM sessions s JOIN accounts a ON a.id = s.account_id
       WHERE s.token_hash = $1 AND s.expires_at > $2`,
     [hashToken(token), opts.now],

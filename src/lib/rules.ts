@@ -2,7 +2,8 @@
 import rawRules from '../../rules/rules.json';
 import { isIsoDate } from './dates';
 
-export const SUPPORTED_STATES = ['CA', 'TX', 'FL', 'WA', 'AZ', 'NV'] as const;
+/** M1's six states, then the ten added in M3. */
+export const SUPPORTED_STATES = ['CA', 'TX', 'FL', 'WA', 'AZ', 'NV', 'CO', 'GA', 'IL', 'MN', 'NJ', 'NY', 'OH', 'PA', 'UT', 'VA'] as const;
 export type StateCode = (typeof SUPPORTED_STATES)[number];
 export const ROLES = ['sub'] as const;
 export type Role = (typeof ROLES)[number];
@@ -14,7 +15,11 @@ export type RuleKind = (typeof RULE_KINDS)[number];
 export const TRIGGERS = ['firstFurnish', 'lastFurnish', 'eachFurnishMonth'] as const;
 export type Trigger = (typeof TRIGGERS)[number];
 
-export type Offset = { unit: 'days'; days: number } | { unit: 'monthDay'; months: number; day: number };
+export type Offset =
+  | { unit: 'days'; days: number }
+  | { unit: 'monthDay'; months: number; day: number }
+  /** `months` calendar months later (a missing day becomes the month's last), then `days` more; negative = earlier. */
+  | { unit: 'months'; months: number; days: number };
 
 export interface Rule {
   id: string;
@@ -25,7 +30,10 @@ export interface Rule {
   title: string;
   trigger: Trigger;
   offset: Offset;
-  /** A late notice still protects work furnished this many days before it was served (CA, AZ, NV). */
+  /**
+   * A late notice still protects work furnished this many days before it was served (CA, AZ, NV, OH).
+   * Negative: only work from that many days *after* it was given (UT: 5 days after filing).
+   */
   lateLookbackDays?: number;
   citation: string;
   citationUrl: string;
@@ -54,11 +62,19 @@ const nonEmpty = (value: unknown): value is string => typeof value === 'string' 
 const positiveInt = (value: unknown, max: number): value is number =>
   typeof value === 'number' && Number.isInteger(value) && value >= 0 && value <= max;
 
+/** A whole number of days, negative allowed, within ±max. */
+const wholeDays = (value: unknown, max: number): value is number =>
+  typeof value === 'number' && Number.isInteger(value) && Math.abs(value) <= max;
+
 function validateOffset(offset: unknown, where: string): Offset {
   const o = offset as Record<string, unknown> | null;
   if (o?.unit === 'days' && positiveInt(o.days, 3650)) return { unit: 'days', days: o.days };
   if (o?.unit === 'monthDay' && positiveInt(o.months, 120) && positiveInt(o.day, 28) && o.day >= 1) {
     return { unit: 'monthDay', months: o.months, day: o.day };
+  }
+  const days = o?.days ?? 0;
+  if (o?.unit === 'months' && positiveInt(o.months, 120) && o.months >= 1 && wholeDays(days, 365)) {
+    return { unit: 'months', months: o.months, days };
   }
   throw new Error(`${where}: invalid offset ${JSON.stringify(offset)}`);
 }
@@ -88,7 +104,7 @@ function validateRule(raw: unknown, states: Record<string, StateInfo>): Rule {
   if (!isIsoDate(r.lastVerified)) fail('lastVerified must be a YYYY-MM-DD date');
   if (r.lateLookbackDays !== undefined) {
     if (r.kind !== 'notice') fail('lateLookbackDays only applies to notices');
-    if (!positiveInt(r.lateLookbackDays, 365)) fail('lateLookbackDays must be a whole number of days');
+    if (!wholeDays(r.lateLookbackDays, 365)) fail('lateLookbackDays must be a whole number of days');
   }
   return {
     id: r.id as string,
@@ -117,20 +133,31 @@ export function validateRuleSet(raw: unknown): RuleSet {
       throw new Error(`rules: missing state info for ${code}`);
     }
   }
-  if (!Array.isArray(set.rules)) throw new Error('rules: missing rules array');
+  return {
+    version: set.version as string,
+    scope: String(set.scope ?? ''),
+    verification: String(set.verification ?? ''),
+    states: states as Record<StateCode, StateInfo>,
+    rules: parseRules(set),
+  };
+}
+
+/**
+ * Just the validated rules of a rules file, checked against that file's own states. Unlike
+ * validateRuleSet it doesn't need every supported state, so it also reads older files (the
+ * change-tracking baseline, which predates M3's states).
+ */
+export function parseRules(raw: unknown): Rule[] {
+  const set = raw as Record<string, unknown>;
+  const states = (set?.states ?? {}) as Record<string, StateInfo>;
+  if (!Array.isArray(set?.rules)) throw new Error('rules: missing rules array');
   const rules = set.rules.map((r) => validateRule(r, states));
   const seen = new Set<string>();
   for (const rule of rules) {
     if (seen.has(rule.id)) throw new Error(`rules: duplicate id ${rule.id}`);
     seen.add(rule.id);
   }
-  return {
-    version: set.version as string,
-    scope: String(set.scope ?? ''),
-    verification: String(set.verification ?? ''),
-    states: states as Record<StateCode, StateInfo>,
-    rules,
-  };
+  return rules;
 }
 
 export const RULES: RuleSet = validateRuleSet(rawRules);

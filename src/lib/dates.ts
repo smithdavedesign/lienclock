@@ -41,6 +41,17 @@ export function addMonthsOnDay(iso: string, months: number, day: number): string
   return toIso(Date.UTC(y, m - 1 + months, day));
 }
 
+/**
+ * The same day of the month `months` calendar months later. A day the target month doesn't have
+ * becomes its last day (Oct 31 + 4 months → Feb 28/29): of the possible readings, the earlier one.
+ */
+export function addMonths(iso: string, months: number): string {
+  assertIso(iso);
+  const [y, m, d] = parts(iso);
+  const lastDay = new Date(Date.UTC(y, m - 1 + months + 1, 0)).getUTCDate();
+  return toIso(Date.UTC(y, m - 1 + months, Math.min(d, lastDay)));
+}
+
 /** Whole calendar days from `from` to `to` (negative when `to` is earlier). */
 export function daysBetween(from: string, to: string): number {
   assertIso(from);
