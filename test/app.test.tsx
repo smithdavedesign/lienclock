@@ -367,6 +367,86 @@ describe('job actions check ownership', () => {
   });
 });
 
+describe('agreeing to the terms before an account exists', () => {
+  const agreement = (page: string) =>
+    /you agree to the <a href="\/terms">Terms of Use<\/a> and <a href="\/privacy">Privacy Policy<\/a>/.test(page);
+
+  it('shows the agreement next to "Save & email me alerts" for visitors, not for signed-in users', async () => {
+    expect(agreement(await html(CalculatorPage({ searchParams: params({}) })))).toBe(true);
+    await signInAs('office@example.com');
+    expect(agreement(await html(CalculatorPage({ searchParams: params({}) })))).toBe(false);
+  });
+
+  it('shows it on the sign-in form', async () => {
+    expect(agreement(await html(SignInPage({ searchParams: params({}) })))).toBe(true);
+  });
+
+  it('shows it next to the button that creates the account', async () => {
+    const started = await startSignIn(db, { email: 'office@example.com', now: new Date() });
+    if (!started.ok) throw new Error(started.error);
+    const page = await html(SignInPage({ searchParams: params({ token: started.token }) }));
+    expect(page).toContain('Sign in to LienClock');
+    expect(page).toMatch(/By signing in, you agree to the/);
+    expect(agreement(page)).toBe(true);
+  });
+});
+
+describe('deleting the account', () => {
+  it('is offered on the dashboard, saying what goes', async () => {
+    const me = await signInAs('office@example.com');
+    await jobFor(me);
+    await jobFor(me, { state: 'TX', counterparty: 'Lone Star GC', firstFurnishDate: '2026-01-05' });
+    const page = await html(JobsPage({ searchParams: params({}) }));
+    expect(page).toContain('id="account"');
+    expect(page).toMatch(/your 2 jobs/);
+    expect(page).toContain('name="confirm"');
+    expect(page).toContain('Delete my account');
+  });
+
+  it('sends signed-out requests to sign in', async () => {
+    expect(await redirectOf(() => actions.deleteAccountAction(form({ confirm: 'yes' })))).toBe('/signin?next=%2Fjobs');
+  });
+
+  it('needs the box ticked, and deletes nothing without it', async () => {
+    const me = await signInAs('office@example.com');
+    await jobFor(me);
+    expect(await redirectOf(() => actions.deleteAccountAction(form({})))).toBe('/jobs?error=delete-confirm#account');
+    expect(await listJobsForAccount(db, me.id)).toHaveLength(1);
+    expect(cookieJar.has(SESSION_COOKIE)).toBe(true);
+    expect(await html(JobsPage({ searchParams: params({ error: 'delete-confirm' }) }))).toMatch(/Tick the box/);
+  });
+
+  it('deletes the account and its data, signs out and says so', async () => {
+    const me = await signInAs('office@example.com');
+    const job = await jobFor(me);
+    await createProposal(db, { accountId: me.id, source: 'paste', subject: 'Fwd: PO 77', fields: {} });
+    const session = cookieJar.get(SESSION_COOKIE)!.value;
+
+    expect(await redirectOf(() => actions.deleteAccountAction(form({ confirm: 'yes' })))).toBe('/?accountDeleted=1');
+    expect(cookieJar.has(SESSION_COOKIE)).toBe(false);
+    expect(await getSessionAccount(db, session, { now: new Date() })).toBeNull();
+    expect(await getJob(db, job.id)).toBeNull();
+    expect(await listPendingProposals(db, me.id)).toEqual([]);
+    const { rows } = await db.query('SELECT count(*)::int AS n FROM accounts');
+    expect(rows[0]).toEqual({ n: 0 });
+    expect(await html(CalculatorPage({ searchParams: params({ accountDeleted: '1' }) }))).toMatch(
+      /Your account and all its data were deleted/,
+    );
+  });
+
+  it('a second click from the same tab finds no session and deletes nothing else', async () => {
+    const other = await signInAs('other@example.com');
+    cookieJar.clear();
+    await signInAs('office@example.com');
+    const stale = cookieJar.get(SESSION_COOKIE)!;
+    await redirectOf(() => actions.deleteAccountAction(form({ confirm: 'yes' })));
+    cookieJar.set(SESSION_COOKIE, stale);
+    expect(await redirectOf(() => actions.deleteAccountAction(form({ confirm: 'yes' })))).toBe('/signin?next=%2Fjobs');
+    const { rows } = await db.query<{ id: string }>('SELECT id::text AS id FROM accounts');
+    expect(rows).toEqual([{ id: other.id }]);
+  });
+});
+
 describe('calendar and intake actions', () => {
   it('resets the calendar link', async () => {
     const me = await signInAs('office@example.com');

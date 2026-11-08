@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { addDays, addMonthsOnDay, daysBetween, isIsoDate, monthsBetween, todayIn } from '@/lib/dates';
+import { addDays, addMonths, addMonthsOnDay, daysBetween, isIsoDate, monthsBetween, todayIn } from '@/lib/dates';
 
 describe('isIsoDate', () => {
   it.each(['2026-01-01', '2028-02-29', '2026-12-31'])('accepts %s', (s) => {
@@ -47,6 +47,26 @@ describe('addMonthsOnDay', () => {
 
   it('refuses a day that does not exist in every month', () => {
     expect(() => addMonthsOnDay('2026-01-01', 1, 31)).toThrow();
+  });
+});
+
+describe('addMonths', () => {
+  it.each([
+    ['2026-01-10', 4, '2026-05-10'],
+    ['2026-09-15', 4, '2027-01-15'],
+    ['2026-10-31', 4, '2027-02-28'],
+    ['2027-10-31', 4, '2028-02-29'],
+    ['2026-03-31', 1, '2026-04-30'],
+    ['2026-01-31', 1, '2026-02-28'],
+    ['2026-05-31', 8, '2027-01-31'],
+    ['2026-12-31', 12, '2027-12-31'],
+    ['2028-02-29', 12, '2029-02-28'],
+  ])('%s + %i months = %s (a missing day becomes the month’s last)', (from, months, expected) => {
+    expect(addMonths(from, months)).toBe(expected);
+  });
+
+  it('rejects invalid dates', () => {
+    expect(() => addMonths('2026-02-30', 1)).toThrow();
   });
 });
 

@@ -33,7 +33,7 @@ describe('calculator page', () => {
 
   it('shows field errors instead of deadlines for invalid input', async () => {
     const html = await render({ state: 'OR', counterparty: '', firstFurnishDate: '2026-02-30' });
-    expect(html).toContain('LienClock covers CA, TX, FL, WA, AZ, NV for now.');
+    expect(html).toContain('LienClock covers CA, TX, FL, WA, AZ, NV, CO, GA, IL, MN, NJ, NY, OH, PA, UT, VA for now.');
     expect(html).toContain('Enter the GC or owner you are working for.');
     expect(html).toContain('Enter a valid date for the first furnishing date');
     expect(html).not.toContain('<table');

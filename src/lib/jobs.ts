@@ -72,13 +72,29 @@ function fromRow(row: JobRow): StoredJob {
   };
 }
 
-export async function createJob(db: Db, draft: JobDraft): Promise<StoredJob> {
+/** The account already tracks as many jobs as its plan allows (the Free plan's limit). */
+export class JobLimitReached extends Error {
+  constructor(readonly limit: number) {
+    super(`The plan allows ${limit} tracked ${limit === 1 ? 'job' : 'jobs'}.`);
+    this.name = 'JobLimitReached';
+  }
+}
+
+/**
+ * Saves a job. With a `jobLimit`, the count and the insert are one statement, so the limit holds
+ * without a separate check (concurrent saves can overshoot by the number in flight, as with the
+ * sign-in rate limit). Throws JobLimitReached when the account is at its limit.
+ */
+export async function createJob(db: Db, draft: JobDraft, opts: { jobLimit?: number | null } = {}): Promise<StoredJob> {
   assertValidJob(draft);
   if (!draft.alertEmail) throw new Error('An alert email is required to save a job');
   if (draft.accountId !== undefined && !isJobId(draft.accountId)) throw new Error('Invalid account id');
+  const limit = opts.jobLimit ?? null;
+  if (limit !== null && draft.accountId === undefined) throw new Error('A job limit needs an account');
   const { rows } = await db.query<JobRow>(
     `INSERT INTO jobs (id, state, role, project_type, counterparty, first_furnish_date, last_furnish_date, alert_email, account_id)
-     VALUES ($1, $2, $3, $4, $5, $6::date, $7::date, $8, $9::uuid)
+     SELECT $1::uuid, $2::text, $3::text, $4::text, $5::text, $6::date, $7::date, $8::text, $9::uuid
+      WHERE $10::int IS NULL OR (SELECT count(*) FROM jobs WHERE account_id = $9::uuid) < $10::int
      RETURNING ${COLUMNS}`,
     [
       randomUUID(),
@@ -90,8 +106,10 @@ export async function createJob(db: Db, draft: JobDraft): Promise<StoredJob> {
       draft.lastFurnishDate ?? null,
       draft.alertEmail,
       draft.accountId ?? null,
+      limit,
     ],
   );
+  if (!rows[0]) throw new JobLimitReached(limit ?? 0);
   return fromRow(rows[0]);
 }
 

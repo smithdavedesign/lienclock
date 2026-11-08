@@ -7,6 +7,7 @@ import {
   SIGN_IN_LINK_MINUTES,
   accountByFeedToken,
   accountByIntakeToken,
+  deleteAccount,
   deliverSignInLink,
   endSession,
   findOrCreateAccount,
@@ -20,7 +21,8 @@ import {
   startSignIn,
 } from '@/lib/auth';
 import { createMemoryDb, ensureSchema, type Db } from '@/lib/db';
-import { getJob, listJobsForAccount } from '@/lib/jobs';
+import { confirmProposal, createProposal, listPendingProposals } from '@/lib/inbound';
+import { createJob, getJob, listJobsForAccount } from '@/lib/jobs';
 
 const NOW = new Date('2026-03-14T16:00:00Z');
 const later = (minutes: number) => new Date(NOW.getTime() + minutes * 60_000);
@@ -236,6 +238,77 @@ describe('sessions', () => {
     expect(await getSessionAccount(db, '', { now: NOW })).toBeNull();
     expect(await getSessionAccount(db, "' OR 1=1 --", { now: NOW })).toBeNull();
     expect(await getSessionAccount(db, 'C'.repeat(43), { now: NOW })).toBeNull();
+  });
+});
+
+describe('deleteAccount (the privacy policy promises self-serve deletion)', () => {
+  const job = { ...pendingJob, counterparty: 'Acme Builders' };
+  const count = async (sql: string, params: unknown[]) => (await db.query<{ n: number }>(sql, params)).rows[0].n;
+
+  it('removes the account and everything it owns, and nothing of anyone else', async () => {
+    const mine = await signedIn('office@example.com');
+    const theirs = await signedIn('other@example.com');
+    const owned = await createJob(db, { ...job, alertEmail: mine.account.email, accountId: mine.account.id });
+    const othersJob = await createJob(db, { ...job, alertEmail: theirs.account.email, accountId: theirs.account.id });
+    // M1-era jobs had no account; one still alerts this (now verified) address, in another case.
+    const legacy = await createJob(db, { ...job, alertEmail: 'Office@Example.com' });
+    const legacyOther = await createJob(db, { ...job, alertEmail: 'someone@example.com' });
+    await db.query(
+      `INSERT INTO alerts (job_id, deadline_key, deadline_date, threshold_days, to_email, subject, body)
+       VALUES ($1, 'ca-preliminary-notice', '2026-03-21', 7, $2, 'Due soon', 'Serve the notice')`,
+      [owned.id, mine.account.email],
+    );
+    // One proposal confirmed into a job (job_id is ON DELETE SET NULL inside the same cascade), one pending.
+    const accepted = (await createProposal(db, { accountId: mine.account.id, source: 'paste', subject: '', fields: {} }))!;
+    const confirmed = await confirmProposal(db, mine.account, accepted.id, {
+      state: 'AZ',
+      counterparty: 'Desert Ridge Builders',
+      firstFurnishDate: '2026-03-02',
+      lastFurnishDate: '',
+    });
+    expect(confirmed.ok).toBe(true);
+    await createProposal(db, { accountId: mine.account.id, source: 'paste', subject: 'Fwd: PO 9', fields: {} });
+    await createProposal(db, { accountId: theirs.account.id, source: 'paste', subject: 'Theirs', fields: {} });
+    // An unused sign-in link for each address.
+    await startSignIn(db, { email: 'office@example.com', now: NOW });
+    await startSignIn(db, { email: 'other@example.com', now: NOW });
+
+    expect(await deleteAccount(db, mine.account.id)).toBe(true);
+
+    expect(await count('SELECT count(*)::int AS n FROM accounts WHERE id = $1', [mine.account.id])).toBe(0);
+    expect(await listJobsForAccount(db, mine.account.id)).toEqual([]);
+    expect(await getJob(db, owned.id)).toBeNull();
+    expect(await getJob(db, legacy.id)).toBeNull();
+    expect(await count('SELECT count(*)::int AS n FROM alerts WHERE to_email = $1', [mine.account.email])).toBe(0);
+    expect(await count('SELECT count(*)::int AS n FROM intake_proposals WHERE account_id = $1', [mine.account.id])).toBe(0);
+    expect(await count('SELECT count(*)::int AS n FROM sessions WHERE account_id = $1', [mine.account.id])).toBe(0);
+    expect(await count('SELECT count(*)::int AS n FROM login_tokens WHERE email = $1', ['office@example.com'])).toBe(0);
+    expect(await getSessionAccount(db, mine.sessionToken, { now: NOW })).toBeNull();
+    expect(await accountByFeedToken(db, mine.account.feedToken)).toBeNull();
+    expect(await accountByIntakeToken(db, mine.account.intakeToken)).toBeNull();
+
+    expect(await getSessionAccount(db, theirs.sessionToken, { now: NOW })).toEqual(theirs.account);
+    expect(await getJob(db, othersJob.id)).not.toBeNull();
+    expect(await getJob(db, legacyOther.id)).not.toBeNull();
+    expect(await listPendingProposals(db, theirs.account.id)).toHaveLength(1);
+    expect(await count('SELECT count(*)::int AS n FROM login_tokens WHERE email = $1', ['other@example.com'])).toBeGreaterThan(0);
+  });
+
+  it('kills pending sign-in links, so an old email can’t bring the account back without a new opt-in', async () => {
+    const { account } = await signedIn('office@example.com');
+    const started = await startSignIn(db, { email: 'office@example.com', pendingJob, now: NOW });
+    if (!started.ok) throw new Error(started.error);
+    await deleteAccount(db, account.id);
+    expect(await peekSignIn(db, started.token, { now: NOW })).toBeNull();
+    expect(await finishSignIn(db, started.token, { now: NOW })).toEqual({ ok: false });
+  });
+
+  it('returns false for an unknown or malformed id, and on a second call', async () => {
+    const { account } = await signedIn('office@example.com');
+    expect(await deleteAccount(db, '00000000-0000-4000-8000-000000000000')).toBe(false);
+    expect(await deleteAccount(db, "' OR 1=1 --")).toBe(false);
+    expect(await deleteAccount(db, account.id)).toBe(true);
+    expect(await deleteAccount(db, account.id)).toBe(false);
   });
 });
 

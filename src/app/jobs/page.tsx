@@ -1,4 +1,6 @@
 import type { Metadata } from 'next';
+import type { Account } from '@/lib/auth';
+import { FREE_JOB_LIMIT, PRO_PRICE_LABEL, billingFrom, checkoutUrl, isPaid, type Billing } from '@/lib/billing';
 import { appUrlFrom } from '@/lib/cron';
 import { getDb } from '@/lib/db';
 import { statusLabel } from '@/lib/deadlines';
@@ -6,7 +8,7 @@ import { feedUrls } from '@/lib/ics';
 import { MAX_PENDING_PROPOSALS, intakeAddressFor, listPendingProposals } from '@/lib/inbound';
 import { listJobsForAccount, summarizeJobs } from '@/lib/jobs';
 import { STATES } from '@/lib/rules';
-import { pasteIntakeAction, rotateFeedAction, signOutAction } from '../actions';
+import { deleteAccountAction, pasteIntakeAction, rotateFeedAction, signOutAction } from '../actions';
 import { requireAccount } from '../session';
 
 export const metadata: Metadata = { title: 'Your jobs — LienClock', robots: { index: false, follow: false } };
@@ -17,6 +19,47 @@ const ERRORS: Record<string, string> = {
   'paste-empty': 'Paste the text of a PO or contract email first.',
   'intake-full': `You have ${MAX_PENDING_PROPOSALS} emails waiting for review. Confirm or discard some first.`,
 };
+
+/** Early access (billing not configured), Free, or Pro in one of Stripe's states. */
+function Plan({ account, billing, jobCount }: { account: Account; billing: Billing | null; jobCount: number }) {
+  const status = account.subscriptionStatus;
+  const manage = billing?.portalUrl ? <a href={billing.portalUrl}>Manage billing or cancel</a> : null;
+  if (isPaid(status)) {
+    return (
+      <>
+        <p>
+          <strong>{`LienClock Pro, ${PRO_PRICE_LABEL}`}</strong>
+          {status === 'trialing' ? ' (trial)' : ''}: unlimited jobs and alerts.
+        </p>
+        {status === 'past_due' && (
+          <p className="error" role="alert">
+            Your last payment failed. Update your card to keep Pro: Stripe retries the charge for a few days.
+          </p>
+        )}
+        {manage && <p>{manage}</p>}
+      </>
+    );
+  }
+  if (!billing) {
+    return <p>{`Early access: track as many jobs as you like, free. Pro will cost ${PRO_PRICE_LABEL} once paid plans open.`}</p>;
+  }
+  return (
+    <>
+      {status === 'incomplete' && <p>Stripe is still confirming your first payment. Pro starts as soon as it does.</p>}
+      {status && status !== 'incomplete' && (
+        <p>Your Pro subscription has ended. Jobs you already track keep their alerts; subscribe again to add more.</p>
+      )}
+      <p>
+        <strong>Free plan</strong>
+        {`: ${FREE_JOB_LIMIT} tracked job (you track ${Math.min(jobCount, FREE_JOB_LIMIT)} of ${FREE_JOB_LIMIT}). Pro tracks unlimited jobs for ${PRO_PRICE_LABEL}, with no per-notice fees.`}
+      </p>
+      <p>
+        <a className="button" href={checkoutUrl(billing, account)}>{`Subscribe to Pro: ${PRO_PRICE_LABEL}`}</a>
+      </p>
+      {manage && status && <p>{manage}</p>}
+    </>
+  );
+}
 
 function timing(daysLeft: number): string {
   if (daysLeft === 0) return 'due today';
@@ -36,6 +79,8 @@ export default async function JobsPage({ searchParams }: { searchParams: SearchP
   const feed = feedUrls(account, appUrlFrom(process.env));
   const intakeAddress = intakeAddressFor(account, process.env);
   const error = typeof query.error === 'string' ? ERRORS[query.error] : undefined;
+  const billing = billingFrom(process.env);
+  const paid = isPaid(account.subscriptionStatus);
 
   return (
     <>
@@ -120,6 +165,21 @@ export default async function JobsPage({ searchParams }: { searchParams: SearchP
         <a href="/">Add a job</a>
       </p>
 
+      <section id="plan" aria-labelledby="plan-heading">
+        <h2 id="plan-heading">Your plan</h2>
+        {query.billing === 'success' && (
+          <p className="flash">
+            {paid ? 'Welcome to LienClock Pro. Add as many jobs as you need.' : 'Thanks! Stripe is confirming your payment: refresh this page in a minute.'}
+          </p>
+        )}
+        {query.error === 'job-limit' && (
+          <p className="error" role="alert">
+            {`The Free plan tracks ${FREE_JOB_LIMIT} job. Subscribe to Pro to add more, or delete a job you no longer need.`}
+          </p>
+        )}
+        <Plan account={account} billing={billing} jobCount={jobs.length} />
+      </section>
+
       <section id="calendar" aria-labelledby="calendar-heading">
         <h2 id="calendar-heading">Calendar feed</h2>
         <p>
@@ -149,6 +209,32 @@ export default async function JobsPage({ searchParams }: { searchParams: SearchP
             <textarea name="emailText" rows={8} maxLength={100000} required />
           </label>
           <button type="submit">Propose job fields</button>
+        </form>
+      </section>
+
+      <section id="account" aria-labelledby="account-heading">
+        <h2 id="account-heading">Delete your account</h2>
+        <p>
+          {`This deletes your account, your ${jobs.length} ${jobs.length === 1 ? 'job' : 'jobs'} and their alerts, emails waiting for review and your calendar feed, and signs you out everywhere. It can’t be undone.`}
+        </p>
+        {query.error === 'delete-confirm' && (
+          <p className="error" role="alert">
+            Tick the box to confirm you want to delete your account.
+          </p>
+        )}
+        {query.error === 'delete-subscribed' && (
+          <p className="error" role="alert">
+            {'Your Pro subscription is still active, and deleting the account wouldn’t stop the charges. Cancel it first '}
+            {billing?.portalUrl ? <a href={billing.portalUrl}>in the billing portal</a> : 'from the link in your Stripe receipt'}
+            {', then delete your account.'}
+          </p>
+        )}
+        <form action={deleteAccountAction} className="danger">
+          <label className="check">
+            <input type="checkbox" name="confirm" value="yes" required />
+            I understand: delete everything and stop all alerts.
+          </label>
+          <button type="submit">Delete my account</button>
         </form>
       </section>
     </>

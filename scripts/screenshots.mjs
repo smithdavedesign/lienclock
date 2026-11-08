@@ -3,10 +3,14 @@
 // database, drives it with Playwright (desktop 1280×800 and iPhone 13) and saves viewport PNGs to
 // docs/screenshots/. Chromium is never downloaded: set CHROMIUM_PATH to an installed binary.
 //
-// The app runs with every service credential blanked, so it can't touch a real database or send
-// email: the sign-in link it would email is printed to its console, where this script picks it up.
-// All job data below is made up, and dates are relative to today so statuses stay realistic.
+// The app runs with every real service credential blanked, so it can't touch a real database, send
+// email or reach Stripe. The sign-in link it would email is printed to its console, where this
+// script picks it up. The cron and Stripe webhook secrets are random values made up for this run,
+// so the script can call the cron (which records the rules changelog) and play Stripe's part after
+// a checkout (a signed checkout.session.completed event). The payment links are sample URLs that
+// are never opened. All job data below is made up, and dates are relative to today.
 import { spawn } from 'node:child_process';
+import { createHmac, randomBytes } from 'node:crypto';
 import { mkdir, rm } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { dirname, join } from 'node:path';
@@ -18,6 +22,9 @@ const OUT = join(ROOT, 'docs', 'screenshots');
 const NEXT_BIN = join(ROOT, 'node_modules', 'next', 'dist', 'bin', 'next');
 const DATA_DIR = join(ROOT, '.data', `screenshots-${process.pid}`);
 const SAMPLE_EMAIL = 'office@example.com';
+// Made up for this run only: they exist in this process and the app it starts, nowhere else.
+const CRON_SECRET = randomBytes(24).toString('hex');
+const WEBHOOK_SECRET = randomBytes(24).toString('hex');
 
 const DESKTOP = { viewport: { width: 1280, height: 800 } };
 const { defaultBrowserType: _ignored, ...PHONE } = devices['iPhone 13'];
@@ -29,26 +36,20 @@ function day(offset) {
   return d.toISOString().slice(0, 10);
 }
 
-// The job typed into the calculator: a Texas job with month-by-month notices, one already late.
+// The job typed into the calculator: Pennsylvania (added in M3), with a Notice of Furnishing
+// already past, a notice of intent and the lien claim still ahead.
 const CALCULATOR_JOB = {
-  state: 'TX',
-  counterparty: 'Lone Star Commercial Builders',
-  firstFurnishDate: day(-110),
-  lastFurnishDate: day(-10),
+  state: 'PA',
+  counterparty: 'Keystone Builders Group',
+  firstFurnishDate: day(-150),
+  lastFurnishDate: day(-20),
 };
 
-// More jobs saved to the same account, so the dashboard shows at-risk, missed and protected jobs.
+// Saved after subscribing to Pro: more jobs in M3 states, at risk, missed and fine.
 const MORE_JOBS = [
-  { state: 'AZ', counterparty: 'Mesa Ridge Construction', firstFurnishDate: day(-18) },
-  { state: 'CA', counterparty: 'Harbor Point Builders', firstFurnishDate: day(-14) },
-  { state: 'WA', counterparty: 'Cascade General Contractors', firstFurnishDate: day(-120), lastFurnishDate: day(-30) },
-  { state: 'FL', counterparty: 'Gulf Coast Constructors', firstFurnishDate: day(-52) },
-  {
-    state: 'NV',
-    counterparty: 'Silver State Contractors',
-    firstFurnishDate: day(-25),
-    served: { label: 'Date served: Notice of right to lien', date: day(-20) },
-  },
+  { state: 'OH', counterparty: 'Buckeye Commercial Builders', firstFurnishDate: day(-15) },
+  { state: 'CO', counterparty: 'Front Range Construction', firstFurnishDate: day(-140), lastFurnishDate: day(-100) },
+  { state: 'GA', counterparty: 'Peachtree General Contractors', firstFurnishDate: day(-130), lastFurnishDate: day(-95) },
 ];
 
 function freePort() {
@@ -74,14 +75,24 @@ function appEnv(baseUrl) {
     'RESEND_API_KEY',
     'RESEND_WEBHOOK_SECRET',
     'INTAKE_EMAIL_DOMAIN',
-    'CRON_SECRET',
     'ALERT_FROM_EMAIL',
+    'CONTACT_EMAIL',
     'VERCEL',
     'VERCEL_PROJECT_PRODUCTION_URL',
   ]) {
     env[key] = '';
   }
-  return { ...env, APP_URL: baseUrl, PGLITE_DIR: DATA_DIR, NEXT_TELEMETRY_DISABLED: '1' };
+  return {
+    ...env,
+    APP_URL: baseUrl,
+    PGLITE_DIR: DATA_DIR,
+    NEXT_TELEMETRY_DISABLED: '1',
+    CRON_SECRET,
+    STRIPE_WEBHOOK_SECRET: WEBHOOK_SECRET,
+    // Sample URLs (never opened): they switch billing on so the Free/Pro plans show as in production.
+    STRIPE_PAYMENT_LINK: 'https://buy.stripe.com/sample-lienclock-pro',
+    STRIPE_PORTAL_URL: 'https://billing.stripe.com/p/login/sample-lienclock',
+  };
 }
 
 /** Runs `next <args>`, keeping its output in memory (sign-in links included: never echoed as is). */
@@ -135,6 +146,45 @@ async function waitForSignInLink(server, after, timeoutMs = 30_000) {
   throw new Error(`No sign-in link appeared in the app's output:\n${server.redacted()}`);
 }
 
+/** Runs the daily cron once, as Vercel Cron would: it records the rules changelog. */
+async function runCron(baseUrl) {
+  const res = await fetch(`${baseUrl}/api/cron/alerts`, { headers: { authorization: `Bearer ${CRON_SECRET}` } });
+  const body = await res.json();
+  if (!res.ok || !body.ruleChanges?.ok) throw new Error(`The cron run failed: ${res.status} ${JSON.stringify(body)}`);
+  console.log(`cron: ${body.ruleChanges.created} rule changes recorded, ${body.enqueued} alerts queued`);
+}
+
+/** What Stripe sends after someone pays through the Payment Link: a signed checkout.session.completed. */
+async function completeCheckout(baseUrl, accountId) {
+  const created = Math.floor(Date.now() / 1000);
+  const body = JSON.stringify({
+    id: 'evt_sample_checkout',
+    object: 'event',
+    type: 'checkout.session.completed',
+    created,
+    data: {
+      object: {
+        id: 'cs_sample',
+        object: 'checkout.session',
+        mode: 'subscription',
+        payment_status: 'paid',
+        client_reference_id: accountId,
+        customer: 'cus_sample',
+        subscription: 'sub_sample',
+        customer_details: { email: SAMPLE_EMAIL },
+      },
+    },
+  });
+  const signature = createHmac('sha256', WEBHOOK_SECRET).update(`${created}.${body}`).digest('hex');
+  const res = await fetch(`${baseUrl}/api/stripe/webhook`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'stripe-signature': `t=${created},v1=${signature}` },
+    body,
+  });
+  const result = await res.json();
+  if (!res.ok || !result.updated) throw new Error(`The webhook did not activate Pro: ${res.status} ${JSON.stringify(result)}`);
+}
+
 async function fillJob(page, job) {
   await page.selectOption('select[name="state"]', job.state);
   await page.fill('input[name="counterparty"]', job.counterparty);
@@ -152,20 +202,37 @@ async function shot(page, name, options = {}) {
   console.log(`saved docs/screenshots/${name}.png`);
 }
 
-/** Start page with a job typed in, then the deadlines it triggers. */
+async function scrollTo(page, selector) {
+  await page.locator(selector).evaluate((el) => {
+    el.scrollIntoView({ block: 'start' });
+    window.scrollBy(0, -12);
+  });
+}
+
+/** The calculator with the Pennsylvania job typed in, scrolled to the deadlines it triggers. */
 async function calculator(context, baseUrl, size) {
   const page = await context.newPage();
   await page.goto(baseUrl);
   await fillJob(page, CALCULATOR_JOB);
-  await page.evaluate(() => window.scrollTo(0, 0)); // filling the last field scrolled it into view
-  await shot(page, `home-${size}`);
-  await Promise.all([page.waitForURL(/\?state=TX/), page.getByRole('button', { name: 'Show deadlines' }).click()]);
-  await page.locator('#deadlines-heading').evaluate((el) => {
-    el.scrollIntoView({ block: 'start' });
-    window.scrollBy(0, -12);
-  });
+  await Promise.all([page.waitForURL(/\?state=PA/), page.getByRole('button', { name: 'Show deadlines' }).click()]);
+  await scrollTo(page, '#deadlines-heading');
   await shot(page, `deadlines-${size}`);
   return page;
+}
+
+/** The dashboard: Pro plan and the jobs, most urgent first. The feed address holds a secret: masked. */
+async function dashboard(page, baseUrl, size) {
+  await page.goto(`${baseUrl}/jobs`);
+  await page.getByRole('heading', { name: 'Your jobs' }).waitFor();
+  await page.getByText('LienClock Pro, $29/month').waitFor();
+  await shot(page, `jobs-${size}`, { mask: [page.locator('input.copy')], maskColor: '#d9dee7' });
+}
+
+async function changelog(page, baseUrl, size) {
+  await page.goto(`${baseUrl}/changelog`);
+  await page.getByRole('heading', { name: 'Changes', exact: true }).waitFor();
+  await scrollTo(page, '#changes-heading');
+  await shot(page, `changelog-${size}`);
 }
 
 async function main() {
@@ -188,43 +255,45 @@ async function main() {
     await waitUntilAnswering(baseUrl, server);
     browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PATH });
 
-    // 1. A visitor on a desktop: enters the Texas job, sees its deadlines, saves it with an email.
+    // 0. The first daily cron run on this database records the changes since the baseline rules.
+    await runCron(baseUrl);
+
+    // 1. A visitor on a desktop: enters the Pennsylvania job, sees its deadlines, saves it with an email.
     const desktop = await browser.newContext(DESKTOP);
     const page = await calculator(desktop, baseUrl, 'desktop');
     await page.fill('input[name="alertEmail"]', SAMPLE_EMAIL);
     const before = server.output().length;
     await Promise.all([page.waitForURL(/\/signin\?sent=job/), page.getByRole('button', { name: 'Save & email me alerts' }).click()]);
 
-    // 2. Opens the (locally printed) sign-in link: the account is created and the job saved.
+    // 2. Opens the (locally printed) sign-in link: the account is created and the job saved (Free: 1 job).
     await page.goto(await waitForSignInLink(server, before));
     await Promise.all([page.waitForURL(/\/jobs(\/[0-9a-f-]{36})?$/), page.getByRole('button', { name: 'Sign in to LienClock' }).click()]);
 
-    // 3. Saves more jobs while signed in, and records one served notice.
+    // 3. A second job hits the Free plan's limit and comes back with a subscribe link.
+    await page.goto(baseUrl);
+    await fillJob(page, MORE_JOBS[0]);
+    await Promise.all([page.waitForURL(/limit=1/), page.getByRole('button', { name: 'Save & email me alerts' }).click()]);
+    const subscribe = await page.getByRole('link', { name: /Subscribe to Pro/ }).getAttribute('href');
+    const accountId = new URL(subscribe).searchParams.get('client_reference_id');
+
+    // 4. Pays through the Payment Link; Stripe's webhook makes the account Pro. Then saves the rest.
+    await completeCheckout(baseUrl, accountId);
     for (const job of MORE_JOBS) {
       await page.goto(baseUrl);
       await fillJob(page, job);
       await Promise.all([page.waitForURL(/\/jobs\/[0-9a-f-]{36}$/), page.getByRole('button', { name: 'Save & email me alerts' }).click()]);
-      if (job.served) {
-        const row = page.locator('form.inline', { has: page.getByLabel(job.served.label) });
-        await row.getByLabel(job.served.label).fill(job.served.date);
-        await row.getByRole('button', { name: 'Save' }).click();
-        await page.locator('.badge-protected').first().waitFor();
-      }
     }
 
-    // 4. The dashboard. The calendar feed address holds a secret token: always masked.
-    const dashboard = async (p, size) => {
-      await p.goto(`${baseUrl}/jobs`);
-      await p.getByRole('heading', { name: 'Your jobs' }).waitFor();
-      await shot(p, `jobs-${size}`, { mask: [p.locator('input.copy')], maskColor: '#d9dee7' });
-    };
-    await dashboard(page, 'desktop');
+    await dashboard(page, baseUrl, 'desktop');
+    await changelog(page, baseUrl, 'desktop');
 
     // 5. The same on a phone, signed in to the same account.
     const phone = await browser.newContext(PHONE);
     await calculator(phone, baseUrl, 'mobile');
     await phone.addCookies(await desktop.cookies());
-    await dashboard(await phone.newPage(), 'mobile');
+    const phonePage = await phone.newPage();
+    await dashboard(phonePage, baseUrl, 'mobile');
+    await changelog(phonePage, baseUrl, 'mobile');
   } finally {
     await browser?.close();
     await stop(server);

@@ -1,8 +1,11 @@
+import { FREE_JOB_LIMIT, PRO_PRICE_LABEL, billingFrom, checkoutUrl } from '@/lib/billing';
 import { computeDeadlines, pendingRules } from '@/lib/deadlines';
 import { parseJobForm, type JobForm } from '@/lib/jobInput';
+import { SUPPORTED_STATES } from '@/lib/rules';
 import { saveJob } from './actions';
 import { DeadlineTable } from './DeadlineTable';
 import { JobFields } from './JobFields';
+import { Agreement } from './Legal';
 import { currentAccount } from './session';
 
 type SearchParams = Promise<Record<string, string | string[] | undefined>>;
@@ -25,10 +28,14 @@ export default async function CalculatorPage({ searchParams }: { searchParams: S
   const errors = parsed && !parsed.ok ? parsed.errors : {};
   const job = parsed?.ok ? parsed.value : null;
   const pending = job ? pendingRules(job) : [];
+  const billing = billingFrom(process.env);
 
   return (
     <>
       <h1>Which lien clocks just started?</h1>
+      {first(params.accountDeleted) && (
+        <p className="flash">Your account and all its data were deleted. No more alerts will be sent.</p>
+      )}
       <p className="lede">
         Enter a job to see every preliminary-notice and lien deadline it triggers, with the statute behind each date. Save it
         to get email alerts 14, 7 and 2 days before each deadline, and on the day.
@@ -40,9 +47,22 @@ export default async function CalculatorPage({ searchParams }: { searchParams: S
         <fieldset className="save">
           <legend>Get alerts</legend>
           {account ? (
-            <p>
-              Alerts go to <strong>{account.email}</strong>. The job is saved to <a href="/jobs">your jobs</a>.
-            </p>
+            <>
+              <p>
+                Alerts go to <strong>{account.email}</strong>. The job is saved to <a href="/jobs">your jobs</a>.
+              </p>
+              {first(params.limit) && (
+                <p className="error" role="alert">
+                  {`Your Free plan tracks ${FREE_JOB_LIMIT} job, and it’s in use. `}
+                  {billing ? (
+                    <a href={checkoutUrl(billing, account)}>{`Subscribe to Pro (${PRO_PRICE_LABEL})`}</a>
+                  ) : (
+                    'Subscribe to Pro'
+                  )}
+                  {' to save this one, or delete a job you no longer need.'}
+                </p>
+              )}
+            </>
           ) : (
             <>
               <label>
@@ -57,6 +77,7 @@ export default async function CalculatorPage({ searchParams }: { searchParams: S
               <p className="hint">
                 We email you a link to confirm the address. Your job is saved, and your account created, when you click it.
               </p>
+              <Agreement by="saving" />
             </>
           )}
           <button type="submit" formAction={saveJob}>
@@ -74,6 +95,27 @@ export default async function CalculatorPage({ searchParams }: { searchParams: S
           )}
         </section>
       )}
+
+      <section aria-labelledby="pricing-heading" className="pricing">
+        <h2 id="pricing-heading">Pricing</h2>
+        <div className="plans">
+          <div className="plan">
+            <h3>Free</h3>
+            <p>{`The deadline calculator for ${SUPPORTED_STATES.length} states, and ${FREE_JOB_LIMIT} tracked job with email alerts and a calendar feed.`}</p>
+          </div>
+          <div className="plan">
+            <h3>{`Pro: ${PRO_PRICE_LABEL}`}</h3>
+            <p>
+              Unlimited jobs, alerts before every deadline, the calendar feed and email intake. A flat price with no per-notice
+              fees. Cancel anytime.
+            </p>
+          </div>
+        </div>
+        {!billing && <p className="hint">Paid plans aren’t open yet, so every account is unlimited and free during early access.</p>}
+        <p className="hint">
+          <a href="/changelog">{`Which states and statutes LienClock covers, and every rule change`}</a>
+        </p>
+      </section>
     </>
   );
 }

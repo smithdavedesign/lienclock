@@ -124,6 +124,53 @@ CREATE TABLE IF NOT EXISTS intake_proposals (
   UNIQUE (account_id, external_id)
 );
 CREATE INDEX IF NOT EXISTS intake_proposals_pending_idx ON intake_proposals (account_id, created_at) WHERE status = 'pending';
+
+-- M3: billing. Stripe's subscription status as last reported by its webhook (NULL: never subscribed).
+-- billing_updated_at is the Stripe event time of that report, so an older event never wins.
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS subscription_status text;
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS stripe_customer_id text;
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS stripe_subscription_id text;
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS billing_updated_at timestamptz;
+CREATE INDEX IF NOT EXISTS accounts_subscription_idx ON accounts (stripe_subscription_id) WHERE stripe_subscription_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS jobs_state_idx ON jobs (state);
+
+-- M3: the rules changelog. The rules each state had when last synced; revision counts its changes.
+CREATE TABLE IF NOT EXISTS rule_snapshots (
+  state text PRIMARY KEY,
+  revision integer NOT NULL,
+  fingerprint text NOT NULL,
+  rules jsonb NOT NULL,
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS rule_changes (
+  id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  state text NOT NULL,
+  revision integer NOT NULL,
+  rules_version text NOT NULL,
+  items jsonb NOT NULL,
+  emails_queued_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (state, revision)
+);
+
+-- One email per (change, address), sent by the same loop as alerts.
+CREATE TABLE IF NOT EXISTS rule_change_emails (
+  id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  change_id integer NOT NULL REFERENCES rule_changes(id) ON DELETE CASCADE,
+  to_email text NOT NULL,
+  subject text NOT NULL,
+  body text NOT NULL,
+  status text NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'sending', 'sent', 'failed')),
+  attempts integer NOT NULL DEFAULT 0,
+  claimed_at timestamptz,
+  sent_at timestamptz,
+  last_error text,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (change_id, to_email)
+);
+CREATE INDEX IF NOT EXISTS rule_change_emails_queue_idx ON rule_change_emails (id) WHERE status IN ('pending', 'sending');
+CREATE INDEX IF NOT EXISTS rule_change_emails_to_idx ON rule_change_emails (to_email);
 `;
 
 export async function ensureSchema(db: Db): Promise<void> {

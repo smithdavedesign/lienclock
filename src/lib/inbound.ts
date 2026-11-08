@@ -12,7 +12,7 @@ import type { CronEnv } from './cron';
 import type { Db } from './db';
 import { INTAKE_FIELDS, proposeJobFromEmail, type ProposedFields } from './intake';
 import { parseJobForm, type JobForm } from './jobInput';
-import { createJob, isJobId, type StoredJob } from './jobs';
+import { JobLimitReached, createJob, isJobId, type StoredJob } from './jobs';
 
 export interface IntakeEnv extends CronEnv {
   RESEND_WEBHOOK_SECRET?: string;
@@ -200,10 +200,20 @@ export async function discardProposal(db: Db, accountId: string, id: string): Pr
 export type ConfirmResult =
   | { ok: true; job: StoredJob }
   | { ok: false; reason: 'not_found' }
+  | { ok: false; reason: 'limit' }
   | { ok: false; reason: 'invalid'; errors: Record<string, string> };
 
-/** Creates the job from the values the user confirmed (or corrected). Exactly once per proposal. */
-export async function confirmProposal(db: Db, account: Account, id: string, form: JobForm): Promise<ConfirmResult> {
+/**
+ * Creates the job from the values the user confirmed (or corrected). Exactly once per proposal.
+ * At the plan's job limit nothing is created and the proposal stays pending.
+ */
+export async function confirmProposal(
+  db: Db,
+  account: Account,
+  id: string,
+  form: JobForm,
+  opts: { jobLimit?: number | null } = {},
+): Promise<ConfirmResult> {
   const parsed = parseJobForm({ ...form, alertEmail: undefined }, { requireEmail: false });
   if (!isJobId(id)) return { ok: false, reason: 'not_found' };
   if (!parsed.ok) {
@@ -219,9 +229,10 @@ export async function confirmProposal(db: Db, account: Account, id: string, form
   if (claimed.rows.length === 0) return { ok: false, reason: 'not_found' };
   let job: StoredJob;
   try {
-    job = await createJob(db, { ...parsed.value, alertEmail: account.email, accountId: account.id });
+    job = await createJob(db, { ...parsed.value, alertEmail: account.email, accountId: account.id }, { jobLimit: opts.jobLimit });
   } catch (error) {
     await db.query(`UPDATE intake_proposals SET status = 'pending' WHERE id = $1 AND status = 'accepted' AND job_id IS NULL`, [id]);
+    if (error instanceof JobLimitReached) return { ok: false, reason: 'limit' };
     throw error;
   }
   await db.query('UPDATE intake_proposals SET job_id = $2 WHERE id = $1', [id, job.id]);

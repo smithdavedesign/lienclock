@@ -4,6 +4,8 @@ import { STATES, SUPPORTED_STATES } from '@/lib/rules';
 
 type FieldName = 'state' | 'counterparty' | 'firstFurnishDate' | 'lastFurnishDate';
 
+const STATES_BY_NAME = [...SUPPORTED_STATES].sort((a, b) => STATES[a].name.localeCompare(STATES[b].name));
+
 function FieldError({ message, id }: { message?: string; id: string }) {
   return message ? (
     <span className="error" id={id}>
@@ -30,7 +32,7 @@ export function JobFields({
           <option value="" disabled>
             Choose…
           </option>
-          {SUPPORTED_STATES.map((code) => (
+          {STATES_BY_NAME.map((code) => (
             <option key={code} value={code}>
               {STATES[code].name}
             </option>

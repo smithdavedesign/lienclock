@@ -94,19 +94,22 @@ describe('M1 exit criteria', () => {
       { firstFurnishDate: '2026-01-05', lastFurnishDate: '2026-04-20' },
       { firstFurnishDate: '2025-11-30', lastFurnishDate: '2026-02-28' },
     ];
+    // A first-tier sub on a commercial job owes no notice counted from first furnishing in these
+    // states (M1: WA; M3: CO, GA, IL, NJ, NY, VA), so without a last-furnishing date there is nothing yet.
+    const NOTHING_BEFORE_LAST_FURNISH = ['WA', 'CO', 'GA', 'IL', 'NJ', 'NY', 'VA'];
+    // The M1 rules were verified on 2026-10-25; the M3 states on 2026-11-08 (ROADMAP M3).
+    const M1_STATES = ['CA', 'TX', 'FL', 'WA', 'AZ', 'NV'];
     let checked = 0;
     for (const state of SUPPORTED_STATES) {
       for (const shape of shapes) {
         const deadlines = computeDeadlines({ ...base, state, ...shape }, { today: '2026-03-01' });
-        // WA: a first-tier sub on a commercial job owes no preliminary notice, so without a
-        // last-furnishing date there is nothing to return yet.
-        if (state !== 'WA' || 'lastFurnishDate' in shape) expect(deadlines.length).toBeGreaterThan(0);
+        if (!NOTHING_BEFORE_LAST_FURNISH.includes(state) || 'lastFurnishDate' in shape) expect(deadlines.length).toBeGreaterThan(0);
         for (const d of deadlines) {
           expect(d.citationUrl).toMatch(/^https:\/\/\S+$/);
           expect(() => new URL(d.citationUrl)).not.toThrow();
           expect(d.citation.trim()).not.toBe('');
           expect(isIsoDate(d.lastVerified)).toBe(true);
-          expect(d.lastVerified <= '2026-10-25').toBe(true);
+          expect(d.lastVerified <= (M1_STATES.includes(state) ? '2026-10-25' : '2026-11-08')).toBe(true);
           checked += 1;
         }
       }

@@ -164,23 +164,39 @@ interface ClaimedAlert {
   attempts: number;
 }
 
-export async function sendPendingAlerts(
+/**
+ * The email queues that share one send loop. Each table has the same delivery columns (to_email,
+ * subject, body, status, attempts, claimed_at, sent_at, last_error); table names come only from here.
+ */
+const QUEUES = {
+  alerts: { table: 'alerts', keyPrefix: 'lienclock-alert' },
+  ruleChanges: { table: 'rule_change_emails', keyPrefix: 'lienclock-rule-change' },
+} as const;
+
+/** Rule-change emails per run: Resend's free 100/day is shared with deadline alerts and sign-in links. */
+export const RULE_CHANGE_BATCH = 50;
+
+export type SendResult = { sent: number; retrying: number; failed: number };
+
+async function sendQueued(
   db: Db,
   sender: AlertSender,
-  opts: { now: Date; limit?: number },
-): Promise<{ sent: number; retrying: number; failed: number }> {
+  queue: (typeof QUEUES)[keyof typeof QUEUES],
+  opts: { now: Date; limit: number },
+): Promise<SendResult> {
+  const { table, keyPrefix } = queue;
   const staleBefore = new Date(opts.now.getTime() - STALE_CLAIM_MS);
   // Claiming is one atomic UPDATE: two overlapping runs can never pick the same row.
   const { rows } = await db.query<ClaimedAlert>(
-    `UPDATE alerts SET status = 'sending', claimed_at = $1, attempts = attempts + 1
+    `UPDATE ${table} SET status = 'sending', claimed_at = $1, attempts = attempts + 1
       WHERE id IN (
-        SELECT id FROM alerts
+        SELECT id FROM ${table}
          WHERE status = 'pending' OR (status = 'sending' AND claimed_at < $2)
          ORDER BY id
          LIMIT $3
          FOR UPDATE SKIP LOCKED)
       RETURNING id, to_email, subject, body, attempts`,
-    [opts.now, staleBefore, opts.limit ?? SEND_BATCH],
+    [opts.now, staleBefore, opts.limit],
   );
   const result = { sent: 0, retrying: 0, failed: 0 };
   for (const alert of rows.sort((a, b) => a.id - b.id)) {
@@ -189,17 +205,17 @@ export async function sendPendingAlerts(
         to: alert.to_email,
         subject: alert.subject,
         text: alert.body,
-        idempotencyKey: `lienclock-alert-${alert.id}`,
+        idempotencyKey: `${keyPrefix}-${alert.id}`,
       });
       await db.query(
-        `UPDATE alerts SET status = 'sent', sent_at = $2, last_error = NULL WHERE id = $1 AND status = 'sending'`,
+        `UPDATE ${table} SET status = 'sent', sent_at = $2, last_error = NULL WHERE id = $1 AND status = 'sending'`,
         [alert.id, opts.now],
       );
       result.sent += 1;
     } catch (error) {
       const giveUp = alert.attempts >= MAX_SEND_ATTEMPTS;
       const message = (error instanceof Error ? error.message : String(error)).slice(0, 500);
-      await db.query(`UPDATE alerts SET status = $2, last_error = $3 WHERE id = $1 AND status = 'sending'`, [
+      await db.query(`UPDATE ${table} SET status = $2, last_error = $3 WHERE id = $1 AND status = 'sending'`, [
         alert.id,
         giveUp ? 'failed' : 'pending',
         message,
@@ -209,4 +225,13 @@ export async function sendPendingAlerts(
     }
   }
   return result;
+}
+
+export function sendPendingAlerts(db: Db, sender: AlertSender, opts: { now: Date; limit?: number }): Promise<SendResult> {
+  return sendQueued(db, sender, QUEUES.alerts, { now: opts.now, limit: opts.limit ?? SEND_BATCH });
+}
+
+/** Rule-change emails (changelog.ts), sent after the alerts so deadlines always come first. */
+export function sendPendingRuleChangeEmails(db: Db, sender: AlertSender, opts: { now: Date; limit?: number }): Promise<SendResult> {
+  return sendQueued(db, sender, QUEUES.ruleChanges, { now: opts.now, limit: opts.limit ?? RULE_CHANGE_BATCH });
 }
