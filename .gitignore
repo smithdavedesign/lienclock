@@ -3,6 +3,9 @@ node_modules/
 out/
 .data/
 .vercel/
+.open-next/
+.wrangler/
+.dev.vars*
 *.tsbuildinfo
 next-env.d.ts
 .env

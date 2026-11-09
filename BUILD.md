@@ -801,44 +801,41 @@ CHROMIUM_PATH=/path/to/chromium npm run screenshots   # ~60 s, writes docs/scree
 
 `scripts/screenshots.mjs` runs `next build`, starts `next start` on a free 127.0.0.1 port and
 waits for it to answer. It then drives Chromium through `playwright-core`, which never
-downloads a browser. Each view is captured at 1280×800 and on an iPhone 13 (viewport only):
+downloads a browser. Each view is captured at 1280×800 and on an iPhone 13 (viewport only).
+Since the go-live pass the views are the launch-ready site doing its main job:
 
-- `deadlines-*`: the calculator's result for a sample **Pennsylvania** job (an M3 state):
-  the notice of intent, the lien claim and a missed Notice of Furnishing.
-- `jobs-*`: the dashboard on **LienClock Pro**. To get there the script takes the real path:
-  1. it saves the PA job with an email (signing up) and signs in with the link from the
-     server output;
-  2. it tries a second job and gets the Free limit and its subscribe link;
-  3. it posts a **signed `checkout.session.completed`** to `/api/stripe/webhook` with the
-     account id from that link, as Stripe would after payment;
-  4. it saves jobs in OH, CO and GA.
-- `changelog-*`: `/changelog` after the first cron run (the script calls
-  `/api/cron/alerts` once the 4 jobs exist). It shows the rules added since the M1 rules, per
-  state. The script also checks the exit criterion live: the run must queue exactly **4**
-  rule-change emails, one per changed state where the account has a job (PA, OH, CO, GA), and
-  none for the other 6 states. Otherwise it fails.
+- `home-*`: the start page with a sample **Pennsylvania** job typed in (the core action);
+- `deadlines-*`: its result: the notice of intent, the lien claim and a missed Notice of
+  Furnishing;
+- `pricing-*`: the plans, the **Get LienClock Pro** button (the script checks it links to
+  `STRIPE_PAYMENT_LINK`) and the footer links (Pricing, Rule changes, Terms, Privacy, Contact).
+- The script fails if the visit beacon sends anything: Playwright is an automated browser and
+  the build isn't production.
 - At the end it **removes any other PNG in `docs/screenshots/`**, so older views don't pile up
-  (this removed M2's `home-*` pair).
+  (the go-live pass removed M3's `jobs-*` and `changelog-*` pairs; the Pro flow and the rules
+  changelog stay covered by `test/m3-app.test.tsx` and `test/m3-exit-criteria.test.ts`).
 
 It is not part of `npm test`.
 
 - **Isolated from real infrastructure:** the app gets only PATH/HOME/locale variables. Every
-  service variable (`DATABASE_URL`, `RESEND_API_KEY`, …) is set to an empty string, which also
-  overrides any `.env` file. Data goes to a throwaway PGlite directory under `.data/`, which
-  is deleted afterwards, and no email can be sent.
-  - `CRON_SECRET` and `STRIPE_WEBHOOK_SECRET` are random values the script makes up at
-    start; they exist only in its process and the app it starts.
-  - `STRIPE_PAYMENT_LINK` and `STRIPE_PORTAL_URL` are sample URLs that are never opened.
-- **No secrets in output:** the server log is kept in memory, and the script shows it, with
-  `token=` values blanked, only when something fails. The calendar feed address, which carries
-  a token, is masked in the dashboard shots.
-- **Sample data only:** made-up GC names and `office@example.com`. Dates are relative to the
-  day of the run, so the statuses (at risk, missed, protected) stay realistic.
+  service variable (`DATABASE_URL`, `RESEND_API_KEY`, `STRIPE_WEBHOOK_SECRET`, …) is set to an
+  empty string, which also overrides any `.env` file. Nothing reaches a database (visitors
+  without a session don't need one), and no email can be sent.
+  - `STRIPE_PAYMENT_LINK` is the placeholder `https://example.com/pay`, never opened.
+- **Sample data only:** a made-up GC name. Dates are relative to the day of the run, so the
+  statuses (at risk, missed) stay realistic.
 - In the sandbox's Chromium the text renders in a monospace fallback because no sans-serif
   font is installed. The stylesheet asks for `system-ui, sans-serif`, so real browsers show a
   sans-serif face.
 
 ## Deploy on a free tier
+
+**Go-live: the app is hosted on Cloudflare Workers** (free plan), because every Vercel deployment
+answers 402. [LAUNCH-READY.md](LAUNCH-READY.md) has the Worker build (`npm run cf:build`), the
+settings it reads and what's left. The Vercel build still works (`npm run build`). The steps below
+were written for Vercel. They still apply on Cloudflare, with two changes: use
+`https://lienclock.1426davejobs.workers.dev` as `<production host>`, and set values as Worker secrets,
+not Vercel env.
 
 1. The pipeline runs `.provision` through the credential broker: the Neon Postgres
    (`DATABASE_URL`), the Vercel project `lienclock`, `CRON_SECRET`, a **full-access**

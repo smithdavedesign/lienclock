@@ -1,0 +1,28 @@
+// The lienclock Worker (Cloudflare Workers free plan). Build with `npm run cf:build`; the credential
+// broker runs a plain `wrangler deploy` and sets the secrets listed in LAUNCH-READY.md.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "lienclock",
+  "main": "worker.ts",
+  "compatibility_date": "2026-11-01",
+  // nodejs_compat: Next.js, node:crypto (webhook signatures) and pg's TCP sockets.
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "workers_dev": true,
+  "preview_urls": false,
+  "assets": {
+    "directory": ".open-next/assets",
+    "binding": "ASSETS"
+  },
+  // The daily alert run, at the same time as vercel.json's cron (15:00 UTC).
+  "triggers": {
+    "crons": ["0 15 * * *"]
+  },
+  // Not secret. APP_URL goes into sign-in links, alert emails, the calendar feed, canonical URLs and
+  // the sitemap; package.json's cf:build passes the same value to the build (a test keeps them equal).
+  "vars": {
+    "APP_URL": "https://lienclock.1426davejobs.workers.dev"
+  },
+  "observability": {
+    "enabled": true
+  }
+}

@@ -1,14 +1,35 @@
-import { FREE_JOB_LIMIT, PRO_PRICE_LABEL, billingFrom, checkoutUrl, hasOpenSubscription } from '@/lib/billing';
+import type { Metadata } from 'next';
+import type { Account } from '@/lib/auth';
+import { FREE_JOB_LIMIT, PRO_PRICE_LABEL, billingFrom, checkoutUrl, hasOpenSubscription, paymentLinkFrom } from '@/lib/billing';
 import { computeDeadlines, pendingRules } from '@/lib/deadlines';
 import { parseJobForm, type JobForm } from '@/lib/jobInput';
 import { SUPPORTED_STATES } from '@/lib/rules';
 import { saveJob } from './actions';
+import { ActivateBeacon, BuyLink } from './Beacon';
 import { DeadlineTable } from './DeadlineTable';
 import { JobFields } from './JobFields';
 import { Agreement } from './Legal';
+import { SITE_DESCRIPTION, publicPageMetadata } from './seo';
 import { currentAccount } from './session';
 
+export const metadata: Metadata = publicPageMetadata({
+  path: '/',
+  title: 'LienClock: lien and preliminary-notice deadline calculator for subcontractors',
+  description: SITE_DESCRIPTION,
+});
+
 type SearchParams = Promise<Record<string, string | string[] | undefined>>;
+
+/**
+ * Where "Get Pro" points, or null to hide it: no Payment Link configured, or the account already has a
+ * subscription Stripe hasn't ended (a second checkout would bill twice). Signed-in buyers carry their
+ * account id and email, so the webhook knows whose payment it is.
+ */
+function buyHref(paymentLink: string | null, account: Account | null): string | null {
+  if (!paymentLink) return null;
+  if (!account) return paymentLink;
+  return hasOpenSubscription(account.subscriptionStatus) ? null : checkoutUrl({ paymentLink }, account);
+}
 
 function first(value: string | string[] | undefined): string | undefined {
   return Array.isArray(value) ? value[0] : value;
@@ -28,7 +49,10 @@ export default async function CalculatorPage({ searchParams }: { searchParams: S
   const errors = parsed && !parsed.ok ? parsed.errors : {};
   const job = parsed?.ok ? parsed.value : null;
   const pending = job ? pendingRules(job) : [];
+  // Both read per request (this page is dynamic): on the Worker they are secrets set without a rebuild.
   const billing = billingFrom(process.env);
+  const paymentLink = paymentLinkFrom(process.env);
+  const buy = buyHref(paymentLink, account);
 
   return (
     <>
@@ -63,7 +87,7 @@ export default async function CalculatorPage({ searchParams }: { searchParams: S
                   ) : (
                     <>
                       {billing ? (
-                        <a href={checkoutUrl(billing, account)}>{`Subscribe to Pro (${PRO_PRICE_LABEL})`}</a>
+                        <BuyLink href={checkoutUrl(billing, account)}>{`Subscribe to Pro (${PRO_PRICE_LABEL})`}</BuyLink>
                       ) : (
                         'Subscribe to Pro'
                       )}
@@ -103,10 +127,11 @@ export default async function CalculatorPage({ searchParams }: { searchParams: S
           {pending.length > 0 && (
             <p className="pending">Add your last furnishing date to see: {pending.map((r) => r.title).join(', ')}.</p>
           )}
+          <ActivateBeacon />
         </section>
       )}
 
-      <section aria-labelledby="pricing-heading" className="pricing">
+      <section id="pricing" aria-labelledby="pricing-heading" className="pricing">
         <h2 id="pricing-heading">Pricing</h2>
         <div className="plans">
           <div className="plan">
@@ -121,7 +146,18 @@ export default async function CalculatorPage({ searchParams }: { searchParams: S
             </p>
           </div>
         </div>
-        {!billing && <p className="hint">Paid plans aren’t open yet, so every account is unlimited and free during early access.</p>}
+        {buy && (
+          <p className="buy">
+            <BuyLink className="button" href={buy}>{`Get LienClock Pro: ${PRO_PRICE_LABEL}`}</BuyLink>
+          </p>
+        )}
+        {!billing && (
+          <p className="hint">
+            {paymentLink
+              ? `During early access the Free plan’s ${FREE_JOB_LIMIT}-job limit isn’t enforced yet, so every account tracks unlimited jobs.`
+              : 'Paid plans aren’t open yet, so every account is unlimited and free during early access.'}
+          </p>
+        )}
         <p className="hint">
           <a href="/changelog">{`Which states and statutes LienClock covers, and every rule change`}</a>
         </p>

@@ -11,7 +11,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { resendSender } from './alerts';
 import { ENDED_SUBSCRIPTION_STATUSES } from './billing';
 import { DEFAULT_FROM, appUrlFrom, type CronEnv } from './cron';
-import type { Db } from './db';
+import { onCloudflareWorkers, type Db } from './db';
 import type { JobInput } from './deadlines';
 import { parseEmail } from './jobInput';
 import { JobLimitReached, createJob, isJobId as isUuid, type StoredJob } from './jobs';
@@ -302,7 +302,8 @@ function signInEmail(link: string, savingJob: boolean): { subject: string; text:
 
 /**
  * Emails the sign-in link through Resend. Without RESEND_API_KEY, local dev prints the link to the
- * server console instead; on Vercel that would hide links in logs, so it fails instead.
+ * server console instead; on Vercel or Cloudflare Workers that would put links in the host's logs, so
+ * it fails instead.
  */
 export async function deliverSignInLink(
   env: CronEnv,
@@ -320,7 +321,7 @@ export async function deliverSignInLink(
     });
     return 'sent';
   }
-  if (env.VERCEL) throw new Error('Email sign-in is not configured: RESEND_API_KEY is missing.');
+  if (env.VERCEL || onCloudflareWorkers()) throw new Error('Email sign-in is not configured: RESEND_API_KEY is missing.');
   (deps.log ?? console.info)(`[dev] RESEND_API_KEY is not set, so here is the sign-in link for ${message.to}: ${link}`);
   return 'logged';
 }

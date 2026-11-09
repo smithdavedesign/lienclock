@@ -122,6 +122,25 @@ describe('pricing on the calculator', () => {
     billingOn();
     expect(text(await html(CalculatorPage({ searchParams: params({}) })))).not.toMatch(/early access/i);
   });
+
+  it('Get Pro (go-live): tagged with the signed-in account, hidden while Stripe holds a subscription', async () => {
+    billingOn();
+    const account = await signInAs('office+buy@example.com');
+    const free = await html(CalculatorPage({ searchParams: params({}) }));
+    const href = /<a href="([^"]+)" class="button">Get LienClock Pro/.exec(free)?.[1].replace(/&amp;/g, '&');
+    expect(href).toBeDefined();
+    const url = new URL(href!);
+    expect(url.origin + url.pathname).toBe(PAYMENT_LINK);
+    expect(url.searchParams.get('client_reference_id')).toBe(account.id);
+    expect(url.searchParams.get('prefilled_email')).toBe('office+buy@example.com');
+
+    for (const status of ['active', 'trialing', 'past_due', 'incomplete', 'unpaid', 'paused']) {
+      await setStatus(account, status);
+      expect(text(await html(CalculatorPage({ searchParams: params({}) }))), status).not.toMatch(/Get LienClock Pro/);
+    }
+    await setStatus(account, 'canceled');
+    expect(text(await html(CalculatorPage({ searchParams: params({}) })))).toMatch(/Get LienClock Pro/);
+  });
 });
 
 describe('the dashboard Plan section', () => {
@@ -131,6 +150,17 @@ describe('the dashboard Plan section', () => {
     expect(page).toContain('id="plan"');
     expect(text(page)).toMatch(/early access/i);
     expect(page).not.toContain('buy.stripe.com');
+  });
+
+  it('early access with a Payment Link but no webhook secret (go-live): Get Pro, still unlimited', async () => {
+    vi.stubEnv('STRIPE_PAYMENT_LINK', PAYMENT_LINK);
+    const account = await signInAs('office@example.com');
+    const page = await html(JobsPage({ searchParams: params({}) }));
+    expect(text(page)).toMatch(/Early access: track as many jobs as you like, free/);
+    expect(text(page)).not.toMatch(/once paid plans open/);
+    expect(page).toContain(`client_reference_id=${account.id}`);
+    await setStatus(account, 'unpaid');
+    expect(await html(JobsPage({ searchParams: params({}) }))).not.toContain('buy.stripe.com');
   });
 
   it('Free: shows the limit and a subscribe link that carries the account and its email', async () => {

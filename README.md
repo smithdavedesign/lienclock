@@ -2,25 +2,25 @@
 
 ## Screenshots
 
-![Deadlines the calculator computed for a sample Pennsylvania job, desktop](docs/screenshots/deadlines-desktop.png)
-The start page (`/`) after entering a sample Pennsylvania job (a state added in M3). It proves the core action works: the notice of intent ("6 months less 30 days"), the lien claim and a missed Notice of Furnishing, each with its statute and last-verified date. The Free and Pro ($29/month) pricing is below.
+![Start page with a sample Pennsylvania job typed in, desktop](docs/screenshots/home-desktop.png)
+The start page (`/`) of the production build, with a sample job filled in: state, GC and furnishing dates. This is the core action, one click from its result.
 
-![Your jobs dashboard on LienClock Pro, desktop](docs/screenshots/jobs-desktop.png)
-Proves the paid path end to end: the account signed up through the emailed link, hit the Free plan's 1-job limit, paid (a signed Stripe `checkout.session.completed` webhook), and is now on LienClock Pro with jobs in Ohio, Colorado, Pennsylvania and Georgia, most urgent first.
+![Deadlines the calculator computed for the Pennsylvania job, desktop](docs/screenshots/deadlines-desktop.png)
+The result: the notice of intent, the lien claim and a missed Notice of Furnishing, each with its due date, status, statute and last-verified date.
 
-![Rule changes page, desktop](docs/screenshots/changelog-desktop.png)
-Proves the rules changelog: the daily cron's first run recorded every rule added since the M1 rules, per state, with deadline and statute. In the same run it queued exactly 4 rule-change emails, one for each state where the sample account has a job, and none for the other 6. The script checks that count.
+![Plans, the Get LienClock Pro button and the footer links, desktop](docs/screenshots/pricing-desktop.png)
+Proves the site is ready to launch. The "Get LienClock Pro: $29/month" button links to `STRIPE_PAYMENT_LINK` (a placeholder in this run), and the footer links to Pricing, Rule changes, Terms of Use, Privacy Policy and Contact (GitHub issues).
+
+![Start page with the sample job on a phone](docs/screenshots/home-mobile.png)
+The same start page on an iPhone 13.
 
 ![Deadlines for the Pennsylvania job on a phone](docs/screenshots/deadlines-mobile.png)
-The same deadlines on an iPhone 13, one labelled card per deadline.
+The result on a phone: one labelled card per deadline.
 
-![Your jobs dashboard on a phone](docs/screenshots/jobs-mobile.png)
-The signed-in Pro dashboard on a phone, with each job's state, first-furnish date, next deadline and status.
+![Get Pro button and footer links on a phone](docs/screenshots/pricing-mobile.png)
+The Get Pro button and the footer links on a phone.
 
-![Rule changes page on a phone](docs/screenshots/changelog-mobile.png)
-The rules changelog on a phone.
-
-_All data is made up. Regenerate with `npm run screenshots` (needs `CHROMIUM_PATH`, see [Build notes](BUILD.md))._
+_All data is made up. The run checks that the visit beacon sent nothing (automated browser, not a production build). Regenerate with `npm run screenshots` (needs `CHROMIUM_PATH`, see [Build notes](BUILD.md))._
 
 For owners of small specialty subcontractors working across states, it computes each job's preliminary-notice and lien-filing deadlines and alerts them before they lapse, at a flat price instead of $19 per notice or $149/month platforms.
 
@@ -30,6 +30,7 @@ Now: 16 states (CA, TX, FL, WA, AZ, NV, CO, GA, IL, MN, NJ, NY, OH, PA, UT, VA),
 - [PRD](PRD.md)
 - [Roadmap](ROADMAP.md)
 - [Build notes](BUILD.md): what works now, how to run, test and deploy it
+- [Launch readiness](LAUNCH-READY.md): search tags, legal pages, the Get Pro button, the visit beacon, hosting on Cloudflare Workers, and what's left before launch
 
 Effort: Medium · Confidence: Low
 

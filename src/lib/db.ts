@@ -1,7 +1,10 @@
 // One tiny query interface over Postgres: `pg` against Neon in production, embedded PGlite
 // (WASM Postgres) for tests and for local dev without DATABASE_URL. Same SQL everywhere.
+// On Node.js (Vercel, `next start`) one pool serves the whole process. On Cloudflare Workers each
+// request opens its own connection and the Worker entry closes it (see requestScope.ts).
 import type { PGlite } from '@electric-sql/pglite';
-import type { Pool } from 'pg';
+import type { Client, Pool } from 'pg';
+import { currentRequestScope, type RequestScope } from './requestScope';
 
 export interface Db {
   query<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<{ rows: T[] }>;
@@ -18,7 +21,8 @@ export function pgliteDb(pg: PGlite): Db {
   };
 }
 
-export function pgPoolDb(pool: Pool): Db {
+/** A pool (Node.js) or a single connection (one Worker request): both have the same query(). */
+export function pgPoolDb(pool: Pool | Client): Db {
   return {
     query: async <T>(sql: string, params?: unknown[]) => ({ rows: (await pool.query(sql, params)).rows as T[] }),
     exec: async (sql) => {
@@ -179,6 +183,11 @@ export async function ensureSchema(db: Db): Promise<void> {
 
 type Env = Record<string, string | undefined>;
 
+/** True inside Cloudflare's workerd runtime: no files, and no socket shared between requests. */
+export function onCloudflareWorkers(): boolean {
+  return typeof navigator !== 'undefined' && navigator.userAgent === 'Cloudflare-Workers';
+}
+
 async function openDb(env: Env): Promise<Db> {
   if (env.DATABASE_URL) {
     const { default: pg } = await import('pg');
@@ -195,10 +204,52 @@ async function openDb(env: Env): Promise<Db> {
   return pgliteDb(pg);
 }
 
+// Workers: whether this isolate has already run ensureSchema. A flag, not a connection, so it may
+// outlive the request that set it; concurrent first requests each run the (idempotent) schema.
+let workerSchemaReady = false;
+
+async function openRequestDb(env: Env, scope: RequestScope): Promise<Db> {
+  if (!env.DATABASE_URL) {
+    // No embedded fallback here: the Worker has no filesystem.
+    throw new Error('DATABASE_URL is not set. Add it as a secret of the lienclock Worker.');
+  }
+  const { default: pg } = await import('pg');
+  const client = new pg.Client({ connectionString: env.DATABASE_URL });
+  let closing = false;
+  // A dropped connection emits 'error'; unhandled, it would take the isolate down. Closing the socket
+  // ourselves emits one too ("This socket has been closed"), which isn't worth a log line.
+  client.on('error', (error) => {
+    if (!closing) console.error('db: connection error:', error.message);
+  });
+  scope.onClose.push(() => {
+    closing = true;
+    return client.end();
+  });
+  await client.connect();
+  const db = pgPoolDb(client);
+  if (!workerSchemaReady) {
+    await ensureSchema(db);
+    workerSchemaReady = true;
+  }
+  return db;
+}
+
+/** Workers: this request's own connection, opened on first use; worker.ts closes it after the response. */
+function requestDb(env: Env): Promise<Db> {
+  const scope = currentRequestScope();
+  if (!scope) return Promise.reject(new Error('getDb() ran outside a request scope: route the Worker through worker.ts.'));
+  scope.db ??= openRequestDb(env, scope).catch((error: unknown) => {
+    scope.db = undefined;
+    throw error;
+  });
+  return scope.db as Promise<Db>;
+}
+
 const cache = globalThis as unknown as { __lienclockDb?: Promise<Db> };
 
-/** The app database, opened once per process with the schema in place. */
+/** The app database with the schema in place: one pool per process, or one connection per Worker request. */
 export function getDb(env: Env = process.env): Promise<Db> {
+  if (onCloudflareWorkers()) return requestDb(env);
   cache.__lienclockDb ??= openDb(env)
     .then(async (db) => {
       await ensureSchema(db);
