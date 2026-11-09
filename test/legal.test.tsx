@@ -98,7 +98,9 @@ describe('privacy policy', () => {
   });
 
   it('names the processors and the only cookie', () => {
-    for (const name of ['Vercel', 'Neon', 'Resend', 'Stripe']) expect(text()).toContain(name);
+    // Go-live: the app is hosted on Cloudflare Workers, not Vercel.
+    for (const name of ['Cloudflare', 'Neon', 'Resend', 'Stripe']) expect(text()).toContain(name);
+    expect(text()).not.toContain('Vercel');
     expect(text()).toContain(SESSION_COOKIE);
     expect(text()).toMatch(/no analytics/i);
   });

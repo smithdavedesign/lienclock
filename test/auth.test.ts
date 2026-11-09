@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   MAX_SIGN_IN_EMAILS_PER_ADDRESS,
   MAX_SIGN_IN_EMAILS_PER_HOUR,
@@ -386,6 +386,19 @@ describe('deliverSignInLink', () => {
     await expect(
       deliverSignInLink({ VERCEL: '1' }, { to: 'office@example.com', token, savingJob: false }, { log: (l) => lines.push(l) }),
     ).rejects.toThrow(/not configured/);
+    expect(lines).toEqual([]);
+  });
+
+  it('fails on Cloudflare Workers too (go-live), where a logged link would land in the Worker logs', async () => {
+    vi.stubGlobal('navigator', { userAgent: 'Cloudflare-Workers' });
+    const lines: string[] = [];
+    try {
+      await expect(
+        deliverSignInLink({ APP_URL: 'https://lienclock.example' }, { to: 'office@example.com', token, savingJob: false }, { log: (l) => lines.push(l) }),
+      ).rejects.toThrow(/not configured/);
+    } finally {
+      vi.unstubAllGlobals();
+    }
     expect(lines).toEqual([]);
   });
 

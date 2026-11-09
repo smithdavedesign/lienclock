@@ -1,8 +1,10 @@
 import type { Metadata } from 'next';
 import type { ReactNode } from 'react';
-import { PRO_PRICE_LABEL } from '@/lib/billing';
 import { appUrlFrom } from '@/lib/cron';
-import { RULES, SUPPORTED_STATES } from '@/lib/rules';
+import { RULES } from '@/lib/rules';
+import { GITHUB_ISSUES_URL, PUBLIC_PAGES, SITE_NAME } from '@/lib/site';
+import { VisitBeacon } from './Beacon';
+import { SITE_DESCRIPTION, jsonLdHtml, softwareApplicationJsonLd } from './seo';
 import './styles.css';
 
 /** The configured app URL, or undefined if APP_URL is malformed: a typo must not take every page down. */
@@ -15,12 +17,14 @@ function metadataBase(): URL | undefined {
 }
 
 // A function, not a constant, so the og:image base URL comes from the env at build/render time.
+// Public pages set their own title, description, canonical URL and cards (seo.ts); these are defaults.
 export function generateMetadata(): Metadata {
   return {
     // og:image and other metadata URLs resolve against the configured host, never the request's.
     metadataBase: metadataBase(),
+    applicationName: SITE_NAME,
     title: 'LienClock: preliminary notice and lien deadlines for subcontractors',
-    description: `See every preliminary-notice and lien deadline a job triggers in ${SUPPORTED_STATES.length} states (${SUPPORTED_STATES.join(', ')}), with the statute behind each date, and get alerts before they lapse. ${PRO_PRICE_LABEL}, no per-notice fees.`,
+    description: SITE_DESCRIPTION,
   };
 }
 
@@ -28,6 +32,11 @@ export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html lang="en">
       <body>
+        <script
+          type="application/ld+json"
+          // Built from constants only (name, price, APP_URL), with `<` escaped.
+          dangerouslySetInnerHTML={{ __html: jsonLdHtml(softwareApplicationJsonLd(appUrlFrom(process.env))) }}
+        />
         <header>
           <a href="/" className="brand">
             LienClock
@@ -46,11 +55,14 @@ export default function RootLayout({ children }: { children: ReactNode }) {
           </p>
           <p>{`Rules version ${RULES.version}.`}</p>
           <nav aria-label="Legal" className="legal-links">
+            <a href="/#pricing">Pricing</a>
             <a href="/changelog">Rule changes</a>
             <a href="/terms">Terms of Use</a>
             <a href="/privacy">Privacy Policy</a>
+            <a href={GITHUB_ISSUES_URL}>Contact</a>
           </nav>
         </footer>
+        <VisitBeacon publicPaths={PUBLIC_PAGES} />
       </body>
     </html>
   );

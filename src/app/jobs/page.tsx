@@ -1,6 +1,15 @@
 import type { Metadata } from 'next';
 import type { Account } from '@/lib/auth';
-import { FREE_JOB_LIMIT, PRO_PRICE_LABEL, billingFrom, checkoutUrl, hasOpenSubscription, isPaid, type Billing } from '@/lib/billing';
+import {
+  FREE_JOB_LIMIT,
+  PRO_PRICE_LABEL,
+  billingFrom,
+  checkoutUrl,
+  hasOpenSubscription,
+  isPaid,
+  paymentLinkFrom,
+  type Billing,
+} from '@/lib/billing';
 import { appUrlFrom } from '@/lib/cron';
 import { getDb } from '@/lib/db';
 import { statusLabel } from '@/lib/deadlines';
@@ -9,6 +18,7 @@ import { MAX_PENDING_PROPOSALS, intakeAddressFor, listPendingProposals } from '@
 import { listJobsForAccount, summarizeJobs } from '@/lib/jobs';
 import { STATES } from '@/lib/rules';
 import { deleteAccountAction, pasteIntakeAction, rotateFeedAction, signOutAction } from '../actions';
+import { BuyLink } from '../Beacon';
 import { requireAccount } from '../session';
 
 export const metadata: Metadata = { title: 'Your jobs — LienClock', robots: { index: false, follow: false } };
@@ -21,7 +31,17 @@ const ERRORS: Record<string, string> = {
 };
 
 /** Early access (billing not configured), Free, or Pro in one of Stripe's states. */
-function Plan({ account, billing, jobCount }: { account: Account; billing: Billing | null; jobCount: number }) {
+function Plan({
+  account,
+  billing,
+  paymentLink,
+  jobCount,
+}: {
+  account: Account;
+  billing: Billing | null;
+  paymentLink: string | null;
+  jobCount: number;
+}) {
   const status = account.subscriptionStatus;
   const manage = billing?.portalUrl ? <a href={billing.portalUrl}>Manage billing or cancel</a> : null;
   if (isPaid(status)) {
@@ -41,7 +61,19 @@ function Plan({ account, billing, jobCount }: { account: Account; billing: Billi
     );
   }
   if (!billing) {
-    return <p>{`Early access: track as many jobs as you like, free. Pro will cost ${PRO_PRICE_LABEL} once paid plans open.`}</p>;
+    // A Payment Link without the webhook secret: Pro can be bought, but the Free limit isn't enforced yet.
+    return paymentLink ? (
+      <>
+        <p>{`Early access: track as many jobs as you like, free. Pro costs ${PRO_PRICE_LABEL}.`}</p>
+        {!hasOpenSubscription(status) && (
+          <p>
+            <BuyLink className="button" href={checkoutUrl({ paymentLink }, account)}>{`Get LienClock Pro: ${PRO_PRICE_LABEL}`}</BuyLink>
+          </p>
+        )}
+      </>
+    ) : (
+      <p>{`Early access: track as many jobs as you like, free. Pro will cost ${PRO_PRICE_LABEL} once paid plans open.`}</p>
+    );
   }
   // Not paid, but Stripe still holds the subscription: subscribing again would start a second one.
   const held = hasOpenSubscription(status);
@@ -64,7 +96,7 @@ function Plan({ account, billing, jobCount }: { account: Account; billing: Billi
       </p>
       {!held && (
         <p>
-          <a className="button" href={checkoutUrl(billing, account)}>{`Subscribe to Pro: ${PRO_PRICE_LABEL}`}</a>
+          <BuyLink className="button" href={checkoutUrl(billing, account)}>{`Subscribe to Pro: ${PRO_PRICE_LABEL}`}</BuyLink>
         </p>
       )}
       {manage && status && <p>{manage}</p>}
@@ -188,7 +220,7 @@ export default async function JobsPage({ searchParams }: { searchParams: SearchP
             {`The Free plan tracks ${FREE_JOB_LIMIT} job. Subscribe to Pro to add more, or delete a job you no longer need.`}
           </p>
         )}
-        <Plan account={account} billing={billing} jobCount={jobs.length} />
+        <Plan account={account} billing={billing} paymentLink={paymentLinkFrom(process.env)} jobCount={jobs.length} />
       </section>
 
       <section id="calendar" aria-labelledby="calendar-heading">

@@ -1,16 +1,14 @@
 #!/usr/bin/env node
-// `npm run screenshots`: builds the app, starts it on localhost against a throwaway embedded
-// database, drives it with Playwright (desktop 1280×800 and iPhone 13) and saves viewport PNGs to
-// docs/screenshots/. Chromium is never downloaded: set CHROMIUM_PATH to an installed binary.
+// `npm run screenshots`: builds the app, starts it on localhost, drives it with Playwright (desktop
+// 1280×800 and iPhone 13) and saves viewport PNGs to docs/screenshots/. Chromium is never downloaded:
+// set CHROMIUM_PATH to an installed binary.
 //
+// It shows the launch-ready site doing its main job: the start page with a sample job typed in, the
+// deadlines that job triggers, and the plans with the "Get LienClock Pro" button and the footer links.
 // The app runs with every real service credential blanked, so it can't touch a real database, send
-// email or reach Stripe. The sign-in link it would email is printed to its console, where this
-// script picks it up. The cron and Stripe webhook secrets are random values made up for this run,
-// so the script can call the cron (which records the rules changelog) and play Stripe's part after
-// a checkout (a signed checkout.session.completed event). The payment links are sample URLs that
-// are never opened. All job data below is made up, and dates are relative to today.
+// email or reach Stripe. STRIPE_PAYMENT_LINK is a placeholder URL that is never opened. All job data is
+// made up, and dates are relative to today.
 import { spawn } from 'node:child_process';
-import { createHmac, randomBytes } from 'node:crypto';
 import { mkdir, readdir, rm } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { dirname, join } from 'node:path';
@@ -21,10 +19,8 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const OUT = join(ROOT, 'docs', 'screenshots');
 const NEXT_BIN = join(ROOT, 'node_modules', 'next', 'dist', 'bin', 'next');
 const DATA_DIR = join(ROOT, '.data', `screenshots-${process.pid}`);
-const SAMPLE_EMAIL = 'office@example.com';
-// Made up for this run only: they exist in this process and the app it starts, nowhere else.
-const CRON_SECRET = randomBytes(24).toString('hex');
-const WEBHOOK_SECRET = randomBytes(24).toString('hex');
+const PAYMENT_LINK = 'https://example.com/pay'; // placeholder: shows the button, never opened
+const SIGNAL_HOST = 'idea-factory.1426davejobs.workers.dev';
 
 const DESKTOP = { viewport: { width: 1280, height: 800 } };
 const { defaultBrowserType: _ignored, ...PHONE } = devices['iPhone 13'];
@@ -36,21 +32,14 @@ function day(offset) {
   return d.toISOString().slice(0, 10);
 }
 
-// The job typed into the calculator: Pennsylvania (added in M3), with a Notice of Furnishing
-// already past, a notice of intent and the lien claim still ahead.
-const CALCULATOR_JOB = {
+// The job typed into the calculator: Pennsylvania, with a Notice of Furnishing already past, a notice
+// of intent and the lien claim still ahead.
+const SAMPLE_JOB = {
   state: 'PA',
   counterparty: 'Keystone Builders Group',
   firstFurnishDate: day(-150),
   lastFurnishDate: day(-20),
 };
-
-// Saved after subscribing to Pro: more jobs in M3 states, at risk, missed and fine.
-const MORE_JOBS = [
-  { state: 'OH', counterparty: 'Buckeye Commercial Builders', firstFurnishDate: day(-15) },
-  { state: 'CO', counterparty: 'Front Range Construction', firstFurnishDate: day(-140), lastFurnishDate: day(-100) },
-  { state: 'GA', counterparty: 'Peachtree General Contractors', firstFurnishDate: day(-130), lastFurnishDate: day(-95) },
-];
 
 function freePort() {
   return new Promise((resolve, reject) => {
@@ -72,13 +61,18 @@ function appEnv(baseUrl) {
   }
   for (const key of [
     'DATABASE_URL',
+    'CRON_SECRET',
     'RESEND_API_KEY',
     'RESEND_WEBHOOK_SECRET',
     'INTAKE_EMAIL_DOMAIN',
     'ALERT_FROM_EMAIL',
     'CONTACT_EMAIL',
+    'STRIPE_WEBHOOK_SECRET',
+    'STRIPE_PORTAL_URL',
     'VERCEL',
     'VERCEL_PROJECT_PRODUCTION_URL',
+    'NEXT_PUBLIC_DEPLOY_ENV',
+    'NEXT_PUBLIC_VERCEL_ENV',
   ]) {
     env[key] = '';
   }
@@ -87,28 +81,19 @@ function appEnv(baseUrl) {
     APP_URL: baseUrl,
     PGLITE_DIR: DATA_DIR,
     NEXT_TELEMETRY_DISABLED: '1',
-    CRON_SECRET,
-    STRIPE_WEBHOOK_SECRET: WEBHOOK_SECRET,
-    // Sample URLs (never opened): they switch billing on so the Free/Pro plans show as in production.
-    STRIPE_PAYMENT_LINK: 'https://buy.stripe.com/sample-lienclock-pro',
-    STRIPE_PORTAL_URL: 'https://billing.stripe.com/p/login/sample-lienclock',
+    // What `provision stripe lienclock … --host cloudflare` sets: the link only, no webhook secret yet.
+    STRIPE_PAYMENT_LINK: PAYMENT_LINK,
   };
 }
 
-/** Runs `next <args>`, keeping its output in memory (sign-in links included: never echoed as is). */
+/** Runs `next <args>`, keeping its output in memory. */
 function runNext(args, env) {
   const child = spawn(process.execPath, [NEXT_BIN, ...args], { cwd: ROOT, env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
   let output = '';
   child.stdout.on('data', (chunk) => (output += chunk));
   child.stderr.on('data', (chunk) => (output += chunk));
   const exited = new Promise((resolve) => child.on('exit', (code, signal) => resolve(code ?? signal)));
-  return {
-    child,
-    exited,
-    output: () => output,
-    /** The output with sign-in tokens blanked, safe to show when something fails. */
-    redacted: () => output.replace(/token=[\w-]+/g, 'token=…'),
-  };
+  return { child, exited, output: () => output };
 }
 
 function stop(proc) {
@@ -124,7 +109,7 @@ function stop(proc) {
 async function waitUntilAnswering(url, server, timeoutMs = 90_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (server.child.exitCode !== null) throw new Error(`The app exited early:\n${server.redacted()}`);
+    if (server.child.exitCode !== null) throw new Error(`The app exited early:\n${server.output()}`);
     try {
       const res = await fetch(url, { signal: AbortSignal.timeout(5000) });
       if (res.ok) return;
@@ -133,31 +118,7 @@ async function waitUntilAnswering(url, server, timeoutMs = 90_000) {
     }
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
-  throw new Error(`The app did not answer on ${url} within ${timeoutMs / 1000} s:\n${server.redacted()}`);
-}
-
-async function waitForSignInLink(server, after, timeoutMs = 30_000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const match = server.output().slice(after).match(/https?:\/\/\S+\/signin\?token=[\w-]+/);
-    if (match) return match[0];
-    await new Promise((resolve) => setTimeout(resolve, 200));
-  }
-  throw new Error(`No sign-in link appeared in the app's output:\n${server.redacted()}`);
-}
-
-/**
- * Runs the daily cron once, as Vercel Cron would. On this fresh database it records the rules added
- * since the baseline (the 10 M3 states) and queues one email per change for each address with a job in
- * that state: here the sample account, for its PA, OH, CO and GA jobs, and nobody for the other 6.
- */
-async function runCron(baseUrl, expectedEmails) {
-  const res = await fetch(`${baseUrl}/api/cron/alerts`, { headers: { authorization: `Bearer ${CRON_SECRET}` } });
-  const body = await res.json();
-  if (!res.ok || !body.ruleChanges?.ok) throw new Error(`The cron run failed: ${res.status} ${JSON.stringify(body)}`);
-  const { created, emailsQueued } = body.ruleChanges;
-  console.log(`cron: ${created} rule changes recorded, ${emailsQueued} rule-change emails queued, ${body.enqueued} alerts queued`);
-  if (emailsQueued !== expectedEmails) throw new Error(`Expected ${expectedEmails} rule-change emails, got ${emailsQueued}`);
+  throw new Error(`The app did not answer on ${url} within ${timeoutMs / 1000} s:\n${server.output()}`);
 }
 
 /** Removes PNGs in docs/screenshots that this run didn't write, so older views don't pile up. */
@@ -170,88 +131,50 @@ async function pruneOld(written) {
   }
 }
 
-/** What Stripe sends after someone pays through the Payment Link: a signed checkout.session.completed. */
-async function completeCheckout(baseUrl, accountId) {
-  const created = Math.floor(Date.now() / 1000);
-  const body = JSON.stringify({
-    id: 'evt_sample_checkout',
-    object: 'event',
-    type: 'checkout.session.completed',
-    created,
-    data: {
-      object: {
-        id: 'cs_sample',
-        object: 'checkout.session',
-        mode: 'subscription',
-        payment_status: 'paid',
-        client_reference_id: accountId,
-        customer: 'cus_sample',
-        subscription: 'sub_sample',
-        customer_details: { email: SAMPLE_EMAIL },
-      },
-    },
-  });
-  const signature = createHmac('sha256', WEBHOOK_SECRET).update(`${created}.${body}`).digest('hex');
-  const res = await fetch(`${baseUrl}/api/stripe/webhook`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', 'stripe-signature': `t=${created},v1=${signature}` },
-    body,
-  });
-  const result = await res.json();
-  if (!res.ok || !result.updated) throw new Error(`The webhook did not activate Pro: ${res.status} ${JSON.stringify(result)}`);
-}
-
-async function fillJob(page, job) {
-  await page.selectOption('select[name="state"]', job.state);
-  await page.fill('input[name="counterparty"]', job.counterparty);
-  await page.fill('input[name="firstFurnishDate"]', job.firstFurnishDate);
-  await page.fill('input[name="lastFurnishDate"]', job.lastFurnishDate ?? '');
-}
-
 const WRITTEN = new Set();
 
-async function shot(page, name, options = {}) {
+async function shot(page, name) {
   await page.evaluate(() => {
     document.activeElement?.blur(); // no focus ring or selected date segment in the picture
     return document.fonts.ready;
   });
-  const path = join(OUT, `${name}.png`);
-  await page.screenshot({ path, ...options });
+  await page.screenshot({ path: join(OUT, `${name}.png`) });
   WRITTEN.add(`${name}.png`);
   console.log(`saved docs/screenshots/${name}.png`);
 }
 
-async function scrollTo(page, selector) {
-  await page.locator(selector).evaluate((el) => {
+/**
+ * One visitor: types the job in (start page), shows its deadlines (the core action and its result),
+ * then scrolls to the plans, the Get Pro button and the footer.
+ */
+async function visit(context, baseUrl, size) {
+  const page = await context.newPage();
+  await page.goto(baseUrl);
+  await page.selectOption('select[name="state"]', SAMPLE_JOB.state);
+  await page.fill('input[name="counterparty"]', SAMPLE_JOB.counterparty);
+  await page.fill('input[name="firstFurnishDate"]', SAMPLE_JOB.firstFurnishDate);
+  await page.fill('input[name="lastFurnishDate"]', SAMPLE_JOB.lastFurnishDate);
+  // Back to the top of the start page. Clicking the heading moves focus off the date field, which
+  // blur() alone doesn't clear in the phone emulation.
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await page.locator('h1').click();
+  await shot(page, `home-${size}`);
+
+  await Promise.all([page.waitForURL(/\?state=PA/), page.getByRole('button', { name: 'Show deadlines' }).click()]);
+  await page.locator('#deadlines-heading').evaluate((el) => {
     el.scrollIntoView({ block: 'start' });
     window.scrollBy(0, -12);
   });
-}
-
-/** The calculator with the Pennsylvania job typed in, scrolled to the deadlines it triggers. */
-async function calculator(context, baseUrl, size) {
-  const page = await context.newPage();
-  await page.goto(baseUrl);
-  await fillJob(page, CALCULATOR_JOB);
-  await Promise.all([page.waitForURL(/\?state=PA/), page.getByRole('button', { name: 'Show deadlines' }).click()]);
-  await scrollTo(page, '#deadlines-heading');
+  const rows = await page.locator('section[aria-labelledby="deadlines-heading"] tbody tr').count();
+  if (rows < 2) throw new Error(`Expected the PA job's deadlines, found ${rows} rows`);
   await shot(page, `deadlines-${size}`);
+
+  const buy = page.getByRole('link', { name: 'Get LienClock Pro: $29/month' });
+  if ((await buy.getAttribute('href')) !== PAYMENT_LINK) throw new Error('The Get Pro button does not link to STRIPE_PAYMENT_LINK');
+  for (const name of ['Terms of Use', 'Privacy Policy']) await page.locator('footer').getByRole('link', { name }).waitFor();
+  await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+  await shot(page, `pricing-${size}`);
   return page;
-}
-
-/** The dashboard: Pro plan and the jobs, most urgent first. The feed address holds a secret: masked. */
-async function dashboard(page, baseUrl, size) {
-  await page.goto(`${baseUrl}/jobs`);
-  await page.getByRole('heading', { name: 'Your jobs' }).waitFor();
-  await page.getByText('LienClock Pro, $29/month').waitFor();
-  await shot(page, `jobs-${size}`, { mask: [page.locator('input.copy')], maskColor: '#d9dee7' });
-}
-
-async function changelog(page, baseUrl, size) {
-  await page.goto(`${baseUrl}/changelog`);
-  await page.getByRole('heading', { name: 'Changes', exact: true }).waitFor();
-  await scrollTo(page, '#changes-heading');
-  await shot(page, `changelog-${size}`);
 }
 
 async function main() {
@@ -265,7 +188,7 @@ async function main() {
 
   console.log('building the app (next build)…');
   const build = runNext(['build'], env);
-  if ((await build.exited) !== 0) throw new Error(`next build failed:\n${build.redacted()}`);
+  if ((await build.exited) !== 0) throw new Error(`next build failed:\n${build.output()}`);
 
   console.log(`starting the app on ${baseUrl}…`);
   const server = runNext(['start', '-p', String(port), '-H', '127.0.0.1'], env);
@@ -273,47 +196,21 @@ async function main() {
   try {
     await waitUntilAnswering(baseUrl, server);
     browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PATH });
-
-    // 1. A visitor on a desktop: enters the Pennsylvania job, sees its deadlines, saves it with an email.
-    const desktop = await browser.newContext(DESKTOP);
-    const page = await calculator(desktop, baseUrl, 'desktop');
-    await page.fill('input[name="alertEmail"]', SAMPLE_EMAIL);
-    const before = server.output().length;
-    await Promise.all([page.waitForURL(/\/signin\?sent=job/), page.getByRole('button', { name: 'Save & email me alerts' }).click()]);
-
-    // 2. Opens the (locally printed) sign-in link: the account is created and the job saved (Free: 1 job).
-    await page.goto(await waitForSignInLink(server, before));
-    await Promise.all([page.waitForURL(/\/jobs(\/[0-9a-f-]{36})?$/), page.getByRole('button', { name: 'Sign in to LienClock' }).click()]);
-
-    // 3. A second job hits the Free plan's limit and comes back with a subscribe link.
-    await page.goto(baseUrl);
-    await fillJob(page, MORE_JOBS[0]);
-    await Promise.all([page.waitForURL(/limit=1/), page.getByRole('button', { name: 'Save & email me alerts' }).click()]);
-    const subscribe = await page.getByRole('link', { name: /Subscribe to Pro/ }).getAttribute('href');
-    const accountId = new URL(subscribe).searchParams.get('client_reference_id');
-
-    // 4. Pays through the Payment Link; Stripe's webhook makes the account Pro. Then saves the rest.
-    await completeCheckout(baseUrl, accountId);
-    for (const job of MORE_JOBS) {
-      await page.goto(baseUrl);
-      await fillJob(page, job);
-      await Promise.all([page.waitForURL(/\/jobs\/[0-9a-f-]{36}$/), page.getByRole('button', { name: 'Save & email me alerts' }).click()]);
+    let beacons = 0;
+    for (const [options, size] of [
+      [DESKTOP, 'desktop'],
+      [PHONE, 'mobile'],
+    ]) {
+      const context = await browser.newContext(options);
+      context.on('request', (request) => {
+        if (new URL(request.url()).host === SIGNAL_HOST) beacons += 1;
+      });
+      await visit(context, baseUrl, size);
+      await context.close();
     }
-
-    // 5. The first daily cron run on this database records the rules added since the baseline and
-    //    emails the account once for each of its 4 states (PA, OH, CO, GA), not for the other 6.
-    await runCron(baseUrl, 4);
-
-    await dashboard(page, baseUrl, 'desktop');
-    await changelog(page, baseUrl, 'desktop');
-
-    // 6. The same on a phone, signed in to the same account.
-    const phone = await browser.newContext(PHONE);
-    await calculator(phone, baseUrl, 'mobile');
-    await phone.addCookies(await desktop.cookies());
-    const phonePage = await phone.newPage();
-    await dashboard(phonePage, baseUrl, 'mobile');
-    await changelog(phonePage, baseUrl, 'mobile');
+    // An automated browser on a non-production build: the visit beacon must stay silent.
+    if (beacons !== 0) throw new Error(`The visit beacon sent ${beacons} requests during the screenshot run`);
+    console.log('beacon: no requests sent (automated browser, not a production build)');
     await pruneOld(WRITTEN);
   } finally {
     await browser?.close();
@@ -323,7 +220,6 @@ async function main() {
 }
 
 main().catch((error) => {
-  // Playwright's own logs quote the URLs it visited, sign-in link included.
-  console.error(String(error instanceof Error ? error.message : error).replace(/token=[\w-]+/g, 'token=…'));
+  console.error(String(error instanceof Error ? error.message : error));
   process.exit(1);
 });

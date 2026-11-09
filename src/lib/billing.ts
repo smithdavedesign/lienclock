@@ -56,9 +56,17 @@ function httpsUrl(value: string | undefined): string | null {
   }
 }
 
+/**
+ * The Payment Link behind the "Get Pro" button, or null (no button) when STRIPE_PAYMENT_LINK is unset or
+ * not https. Read per request: on the Worker it's a secret that can change without a rebuild.
+ */
+export function paymentLinkFrom(env: BillingEnv): string | null {
+  return httpsUrl(env.STRIPE_PAYMENT_LINK);
+}
+
 /** Billing is on only when people can both pay (the link) and be recorded as paid (the webhook). */
 export function billingFrom(env: BillingEnv): Billing | null {
-  const paymentLink = httpsUrl(env.STRIPE_PAYMENT_LINK);
+  const paymentLink = paymentLinkFrom(env);
   if (!paymentLink || !env.STRIPE_WEBHOOK_SECRET) return null;
   return { paymentLink, portalUrl: httpsUrl(env.STRIPE_PORTAL_URL) };
 }
@@ -79,7 +87,7 @@ export function jobLimitFor(account: Pick<Account, 'subscriptionStatus'>, env: B
 }
 
 /** The Payment Link, tagged with the account so the webhook knows whose payment it is. */
-export function checkoutUrl(billing: Billing, account: Pick<Account, 'id' | 'email'>): string {
+export function checkoutUrl(billing: Pick<Billing, 'paymentLink'>, account: Pick<Account, 'id' | 'email'>): string {
   const url = new URL(billing.paymentLink);
   url.searchParams.set('client_reference_id', account.id);
   url.searchParams.set('prefilled_email', account.email);

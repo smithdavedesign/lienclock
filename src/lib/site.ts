@@ -2,7 +2,13 @@
 import { parseEmail } from './jobInput';
 
 /** Date shown as "Last updated" on the terms and the privacy policy. Change it with their text. */
-export const LEGAL_UPDATED = '2026-11-08';
+export const LEGAL_UPDATED = '2026-11-09';
+
+export const SITE_NAME = 'LienClock';
+
+/** The public repository. Its issues are the contact channel named on /privacy and /terms. */
+export const GITHUB_REPO_URL = 'https://github.com/smithdavedesign/lienclock';
+export const GITHUB_ISSUES_URL = `${GITHUB_REPO_URL}/issues`;
 
 /** The pages anyone (and any crawler) may read. Everything else is behind sign-in or a secret URL. */
 export const PUBLIC_PAGES = ['/', '/changelog', '/privacy', '/terms'] as const;

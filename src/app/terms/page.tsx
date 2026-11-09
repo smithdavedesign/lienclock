@@ -3,11 +3,13 @@ import { FREE_JOB_LIMIT, PRO_MONTHLY_USD } from '@/lib/billing';
 import { STATES, SUPPORTED_STATES } from '@/lib/rules';
 import { LEGAL_UPDATED } from '@/lib/site';
 import { ContactLine } from '../Legal';
+import { publicPageMetadata } from '../seo';
 
-export const metadata: Metadata = {
+export const metadata: Metadata = publicPageMetadata({
+  path: '/terms',
   title: 'Terms of Use — LienClock',
-  description: 'LienClock is a deadline reference and reminder tool for subcontractors, not legal advice.',
-};
+  description: 'LienClock is a deadline reference and reminder tool for subcontractors, not legal advice. Price, refunds and no warranty.',
+});
 
 const names = SUPPORTED_STATES.map((code) => STATES[code].name);
 const coveredStates = `${names.slice(0, -1).join(', ')} and ${names.at(-1)}`;

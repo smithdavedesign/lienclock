@@ -2,11 +2,13 @@ import type { Metadata } from 'next';
 import { listRuleChanges, type ChangeItem } from '@/lib/changelog';
 import { getDb } from '@/lib/db';
 import { RULES, STATES, SUPPORTED_STATES } from '@/lib/rules';
+import { publicPageMetadata } from '../seo';
 
-export const metadata: Metadata = {
-  title: 'Rule changes — LienClock',
+export const metadata: Metadata = publicPageMetadata({
+  path: '/changelog',
+  title: 'Lien and notice rule changes by state — LienClock',
   description: 'The states LienClock covers, the statutes behind each deadline, and every change to its rules.',
-};
+});
 
 // Changes are recorded by the daily cron, so read them on every request.
 export const dynamic = 'force-dynamic';

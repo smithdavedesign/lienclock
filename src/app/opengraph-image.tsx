@@ -1,11 +1,14 @@
 import { ImageResponse } from 'next/og';
 import { PRO_PRICE_LABEL } from '@/lib/billing';
 import { SUPPORTED_STATES } from '@/lib/rules';
+import { SHARE_IMAGE } from './seo';
 
-// The og:image for every page (Next adds the meta tags). Prerendered once at build time.
-export const alt = `LienClock: preliminary-notice and lien deadlines for subcontractors in ${SUPPORTED_STATES.length} states. ${PRO_PRICE_LABEL}, no per-notice fees.`;
-export const size = { width: 1200, height: 630 };
-export const contentType = 'image/png';
+// The og:image and twitter:image for every page. Prerendered once at build time (never drawn per
+// request): on the Worker it's served from static assets.
+export const alt = SHARE_IMAGE.alt;
+export const size = { width: SHARE_IMAGE.width, height: SHARE_IMAGE.height };
+export const contentType = SHARE_IMAGE.type;
+export const dynamic = 'force-static';
 
 export default function OpengraphImage() {
   return new ImageResponse(

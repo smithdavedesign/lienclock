@@ -1,12 +1,17 @@
 import type { Metadata } from 'next';
 import { SESSION_COOKIE, SESSION_DAYS, SIGN_IN_LINK_MINUTES } from '@/lib/auth';
+import { NO_TRACK_KEY, SENT_FLAGS, SIGNAL_URL } from '@/lib/signal';
 import { LEGAL_UPDATED } from '@/lib/site';
 import { ContactLine } from '../Legal';
+import { publicPageMetadata } from '../seo';
 
-export const metadata: Metadata = {
+export const metadata: Metadata = publicPageMetadata({
+  path: '/privacy',
   title: 'Privacy Policy — LienClock',
-  description: 'What LienClock stores to track your lien deadlines, who processes it, and how to delete it.',
-};
+  description: 'What LienClock stores to track your lien deadlines, the visit counts it sends, who processes it, and how to delete it.',
+});
+
+const signalHost = new URL(SIGNAL_URL).host;
 
 // Keep this in step with the schema in src/lib/db.ts and with deleteAccount in src/lib/auth.ts.
 export default function PrivacyPage() {
@@ -59,10 +64,31 @@ export default function PrivacyPage() {
         There are no analytics, advertising or third-party cookies.
       </p>
 
+      <h2>Visit counts</h2>
+      <p>
+        {`To count how many people use LienClock, your browser sends a small message to ${signalHost} (RepoHQ, which runs LienClock) for three events:`}
+      </p>
+      <ul>
+        <li>
+          <strong>visit</strong>: you opened a public page (the calculator, rule changes, the terms or this policy), sent
+          once per browser session;
+        </li>
+        <li>
+          <strong>activate</strong>: the calculator showed you the deadlines for a job, sent once per browser;
+        </li>
+        <li>
+          <strong>checkout</strong>: you clicked a button that opens Stripe to subscribe to Pro.
+        </li>
+      </ul>
+      <p>
+        {`Each message holds only the product name (“lienclock”), the event, and the address of the other website that sent you here, if one did. It never holds a LienClock page address, so the job details in a calculator link stay in your browser. It carries no cookies and nothing you typed, and it isn’t linked to your account. Like any web request, it reaches the counter with your IP address and browser type. To remember what was already counted, your browser keeps two small flags (${SENT_FLAGS.visit?.key} in session storage and ${SENT_FLAGS.activate?.key} in local storage). Automated browsers send nothing, and neither does a browser where local storage holds ${NO_TRACK_KEY}. A content blocker that blocks the counter’s address stops it too, and LienClock keeps working.`}
+      </p>
+
       <h2>Who processes it</h2>
       <ul>
         <li>
-          <strong>Vercel</strong> hosts the app and keeps short-lived request logs (page addresses and IP addresses).
+          <strong>Cloudflare</strong> hosts the app (Cloudflare Workers) and keeps short-lived request logs (page addresses and
+          IP addresses).
         </li>
         <li>
           <strong>Neon</strong> hosts the database.
