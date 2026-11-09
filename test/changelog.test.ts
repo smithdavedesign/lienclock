@@ -199,6 +199,38 @@ describe('detecting changes', () => {
     expect(await count('rule_change_emails')).toBe(1);
   });
 
+  it('records the entry and moves the snapshot together: a run that fails between them leaves neither', async () => {
+    // If the entry could outlive a failed snapshot update, the next run (after another edit) would
+    // reuse that entry's revision and leave people emailed about rules that are no longer live.
+    const account = await findOrCreateAccount(db, 'office@example.com');
+    await createJob(db, { ...base, state: 'WA', counterparty: 'Cascade Builders', firstFurnishDate: '2026-11-01', alertEmail: account.email, accountId: account.id });
+    await sync(RULES);
+    await db.exec(`
+      CREATE FUNCTION fail_snapshot_swap() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN RAISE EXCEPTION 'simulated crash while moving the snapshot'; END $$;
+      CREATE TRIGGER fail_snapshot_swap BEFORE UPDATE ON rule_snapshots
+        FOR EACH ROW WHEN (NEW.revision <> OLD.revision) EXECUTE FUNCTION fail_snapshot_swap();
+    `);
+    try {
+      await expect(sync(rulesWith(patch('wa-claim-of-lien', { offset: { unit: 'days', days: 60 } })))).rejects.toThrow(/simulated crash/);
+    } finally {
+      await db.exec('DROP TRIGGER fail_snapshot_swap ON rule_snapshots; DROP FUNCTION fail_snapshot_swap()');
+    }
+    expect(await count('rule_changes')).toBe(0);
+
+    // The rules were edited again before the next run: it reports what is live now, from what was last recorded.
+    const next = await sync(rulesWith(patch('wa-claim-of-lien', { offset: { unit: 'days', days: 45 } })), RULES.rules, later);
+    expect(next.changes).toHaveLength(1);
+    expect(next.changes[0]).toMatchObject({ state: 'WA', revision: 1 });
+    expect(next.changes[0].items[0].fields).toEqual([
+      { label: 'Deadline', before: '90 days after you last furnish', after: '45 days after you last furnish' },
+    ]);
+    const { rows } = await db.query<{ body: string }>('SELECT body FROM rule_change_emails');
+    expect(rows).toHaveLength(1);
+    expect(rows[0].body).toContain('45 days after you last furnish');
+    expect(rows[0].body).not.toContain('60 days');
+  });
+
   it('lists only the jobs in the changed state, grouped per address, and links each one', async () => {
     const account = await findOrCreateAccount(db, 'office@example.com');
     const own = { alertEmail: account.email, accountId: account.id };

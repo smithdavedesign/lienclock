@@ -174,6 +174,32 @@ describe('the dashboard Plan section', () => {
     expect(pending).not.toMatch(/has ended/i);
   });
 
+  it('a subscription still open in Stripe but not paid: no second Subscribe link, and unpaid/paused point to the portal', async () => {
+    // Subscribing again would start a second $29 subscription next to the one Stripe still holds.
+    billingOn();
+    const account = await signInAs('office@example.com');
+    for (const status of ['incomplete', 'unpaid', 'paused']) {
+      await setStatus(account, status);
+      const page = await html(JobsPage({ searchParams: params({}) }));
+      expect(page, status).not.toContain('buy.stripe.com');
+      expect(text(page), status).not.toMatch(/has ended/i);
+      expect(text(page), status).toMatch(/Free plan/);
+    }
+    for (const status of ['unpaid', 'paused']) {
+      await setStatus(account, status);
+      const page = await html(JobsPage({ searchParams: params({}) }));
+      expect(text(page), status).toMatch(/on hold in Stripe/i);
+      expect(page, status).toContain(`href="${PORTAL}"`);
+    }
+    // Over for good: subscribing again is the way back.
+    for (const status of ['canceled', 'incomplete_expired']) {
+      await setStatus(account, status);
+      const page = await html(JobsPage({ searchParams: params({}) }));
+      expect(text(page), status).toMatch(/has ended/i);
+      expect(page, status).toContain(`client_reference_id=${account.id}`);
+    }
+  });
+
   it('after checkout: thanks the user while the webhook is on its way, then welcomes them', async () => {
     billingOn();
     const account = await signInAs('office@example.com');
@@ -198,6 +224,13 @@ describe('the Free-plan job limit on every path that creates a job', () => {
     const page = await html(CalculatorPage({ searchParams: params(Object.fromEntries(query)) }));
     expect(text(page)).toMatch(/Free plan tracks 1 job/);
     expect(page).toContain(`client_reference_id=${account.id}`);
+
+    // With a subscription Stripe still holds (here unpaid), the way out is the plan section, not a new checkout.
+    await setStatus(account, 'unpaid');
+    const held = await html(CalculatorPage({ searchParams: params(Object.fromEntries(query)) }));
+    expect(text(held)).toMatch(/Free plan tracks 1 job/);
+    expect(held).not.toContain('buy.stripe.com');
+    expect(held).toContain('href="/jobs#plan"');
   });
 
   it('save: Pro and early access are unlimited', async () => {
@@ -254,6 +287,19 @@ describe('deleting an account while subscribed', () => {
 
     await setStatus(account, 'canceled');
     expect(await redirectOf(() => actions.deleteAccountAction(form({ confirm: 'yes' })))).toBe('/?accountDeleted=1');
+  });
+
+  it('is refused for a subscription Stripe stopped charging but still holds open (unpaid), with the cancel link', async () => {
+    // "unpaid" isn't Pro (no new jobs), but the subscription still exists: a new card would be charged.
+    billingOn();
+    const account = await signInAs('office@example.com');
+    await setStatus(account, 'unpaid');
+    expect(await redirectOf(() => actions.deleteAccountAction(form({ confirm: 'yes' })))).toBe('/jobs?error=delete-subscribed#account');
+    const { rows } = await db.query('SELECT 1 FROM accounts WHERE id = $1', [account.id]);
+    expect(rows).toHaveLength(1);
+    const page = await html(JobsPage({ searchParams: params({ error: 'delete-subscribed' }) }));
+    expect(text(page)).toMatch(/cancel it first/i);
+    expect(text(page)).not.toMatch(/still active/i);
   });
 });
 

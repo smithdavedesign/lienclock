@@ -1,6 +1,6 @@
 import type { Metadata } from 'next';
 import type { Account } from '@/lib/auth';
-import { FREE_JOB_LIMIT, PRO_PRICE_LABEL, billingFrom, checkoutUrl, isPaid, type Billing } from '@/lib/billing';
+import { FREE_JOB_LIMIT, PRO_PRICE_LABEL, billingFrom, checkoutUrl, hasOpenSubscription, isPaid, type Billing } from '@/lib/billing';
 import { appUrlFrom } from '@/lib/cron';
 import { getDb } from '@/lib/db';
 import { statusLabel } from '@/lib/deadlines';
@@ -43,19 +43,30 @@ function Plan({ account, billing, jobCount }: { account: Account; billing: Billi
   if (!billing) {
     return <p>{`Early access: track as many jobs as you like, free. Pro will cost ${PRO_PRICE_LABEL} once paid plans open.`}</p>;
   }
+  // Not paid, but Stripe still holds the subscription: subscribing again would start a second one.
+  const held = hasOpenSubscription(status);
   return (
     <>
       {status === 'incomplete' && <p>Stripe is still confirming your first payment. Pro starts as soon as it does.</p>}
-      {status && status !== 'incomplete' && (
+      {held && status !== 'incomplete' && (
+        <p>
+          {'Your Pro subscription is on hold in Stripe until a payment goes through. Update your card '}
+          {billing.portalUrl ? <a href={billing.portalUrl}>in the billing portal</a> : 'from the link in your Stripe receipt'}
+          {' to get Pro back. Jobs you already track keep their alerts.'}
+        </p>
+      )}
+      {status && !held && (
         <p>Your Pro subscription has ended. Jobs you already track keep their alerts; subscribe again to add more.</p>
       )}
       <p>
         <strong>Free plan</strong>
         {`: ${FREE_JOB_LIMIT} tracked job (you track ${Math.min(jobCount, FREE_JOB_LIMIT)} of ${FREE_JOB_LIMIT}). Pro tracks unlimited jobs for ${PRO_PRICE_LABEL}, with no per-notice fees.`}
       </p>
-      <p>
-        <a className="button" href={checkoutUrl(billing, account)}>{`Subscribe to Pro: ${PRO_PRICE_LABEL}`}</a>
-      </p>
+      {!held && (
+        <p>
+          <a className="button" href={checkoutUrl(billing, account)}>{`Subscribe to Pro: ${PRO_PRICE_LABEL}`}</a>
+        </p>
+      )}
       {manage && status && <p>{manage}</p>}
     </>
   );
@@ -224,7 +235,7 @@ export default async function JobsPage({ searchParams }: { searchParams: SearchP
         )}
         {query.error === 'delete-subscribed' && (
           <p className="error" role="alert">
-            {'Your Pro subscription is still active, and deleting the account wouldn’t stop the charges. Cancel it first '}
+            {'You still have a Pro subscription in Stripe, and deleting the account wouldn’t stop it. Cancel it first '}
             {billing?.portalUrl ? <a href={billing.portalUrl}>in the billing portal</a> : 'from the link in your Stripe receipt'}
             {', then delete your account.'}
           </p>

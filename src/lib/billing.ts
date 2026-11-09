@@ -4,7 +4,7 @@
 //   Stripe ──POST /api/stripe/webhook (Stripe-Signature: t=…,v1=…)──▶ handleStripeWebhook
 //     verify HMAC-SHA256("t.<raw body>") with STRIPE_WEBHOOK_SECRET, 5-minute window
 //     checkout.session.completed → account by client_reference_id, else by checkout email
-//                                  → customer + subscription ids, status
+//       (and …async_payment_succeeded) → customer + subscription ids, status
 //     customer.subscription.*     → account by subscription id → status
 //     each update applies only if the event is not older than the last one applied (Stripe
 //     doesn't guarantee order), so replays and late deliveries are harmless.
@@ -23,6 +23,11 @@ export const PRO_PRICE_LABEL = `$${PRO_MONTHLY_USD}/month`;
 export const FREE_JOB_LIMIT = 1;
 /** Stripe statuses that keep Pro: past_due too, while Stripe retries the card. */
 const PAID_STATUSES = new Set(['active', 'trialing', 'past_due']);
+/**
+ * Stripe statuses after which a subscription can never charge again. Any other status (unpaid, paused,
+ * incomplete, or one Stripe adds later) is a subscription that still exists in Stripe.
+ */
+export const ENDED_SUBSCRIPTION_STATUSES: readonly string[] = ['canceled', 'incomplete_expired'];
 const SIGNATURE_TOLERANCE_S = 5 * 60;
 const MAX_WEBHOOK_BYTES = 256 * 1024;
 const STATUS = /^[a-z_]{1,32}$/;
@@ -60,6 +65,11 @@ export function billingFrom(env: BillingEnv): Billing | null {
 
 export function isPaid(status: string | null | undefined): boolean {
   return typeof status === 'string' && PAID_STATUSES.has(status);
+}
+
+/** True while the account has a Stripe subscription that deleting the account wouldn't stop. */
+export function hasOpenSubscription(status: string | null | undefined): boolean {
+  return typeof status === 'string' && !ENDED_SUBSCRIPTION_STATUSES.includes(status);
 }
 
 /** How many jobs the account may track: null means no limit (Pro, or billing not configured yet). */
@@ -152,6 +162,9 @@ async function subscriptionChanged(db: Db, event: StripeEvent): Promise<boolean 
 
 const HANDLERS: Record<string, (db: Db, event: StripeEvent) => Promise<boolean | 'ignored'>> = {
   'checkout.session.completed': checkoutCompleted,
+  // A bank debit clears days after checkout. Stripe may have created the subscription as active
+  // already, so no subscription update follows: this event is what turns "incomplete" into Pro.
+  'checkout.session.async_payment_succeeded': checkoutCompleted,
   'customer.subscription.created': subscriptionChanged,
   'customer.subscription.updated': subscriptionChanged,
   'customer.subscription.deleted': subscriptionChanged,

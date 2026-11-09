@@ -303,6 +303,31 @@ describe('deleteAccount (the privacy policy promises self-serve deletion)', () =
     expect(await finishSignIn(db, started.token, { now: NOW })).toEqual({ ok: false });
   });
 
+  it('refuses while a Stripe subscription is still open: the guard is in the DELETE statement itself', async () => {
+    // Deleting the account can't stop Stripe's charges. Checking the status in the same statement
+    // that deletes means a checkout completing between the page's check and the delete still wins.
+    const { account } = await signedIn('office@example.com');
+    const job = await createJob(db, { ...pendingJob, alertEmail: account.email, accountId: account.id });
+    const setStatus = (status: string | null) =>
+      db.query('UPDATE accounts SET subscription_status = $2 WHERE id = $1', [account.id, status]);
+    // Every Stripe status where the subscription still exists and can still charge (or resume charging).
+    for (const status of ['active', 'trialing', 'past_due', 'unpaid', 'incomplete', 'paused', 'some_future_status']) {
+      await setStatus(status);
+      expect(await deleteAccount(db, account.id), status).toBe('subscribed');
+      expect(await getJob(db, job.id), status).not.toBeNull();
+    }
+    await setStatus('incomplete_expired');
+    expect(await deleteAccount(db, account.id)).toBe(true);
+    expect(await getJob(db, job.id)).toBeNull();
+  });
+
+  it('deletes an account whose subscription was canceled', async () => {
+    const { account } = await signedIn('office@example.com');
+    await db.query("UPDATE accounts SET subscription_status = 'canceled' WHERE id = $1", [account.id]);
+    expect(await deleteAccount(db, account.id)).toBe(true);
+    expect(await count('SELECT count(*)::int AS n FROM accounts WHERE id = $1', [account.id])).toBe(0);
+  });
+
   it('returns false for an unknown or malformed id, and on a second call', async () => {
     const { account } = await signedIn('office@example.com');
     expect(await deleteAccount(db, '00000000-0000-4000-8000-000000000000')).toBe(false);

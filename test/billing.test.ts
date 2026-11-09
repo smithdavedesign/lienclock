@@ -7,6 +7,7 @@ import {
   billingFrom,
   checkoutUrl,
   handleStripeWebhook,
+  hasOpenSubscription,
   isPaid,
   jobLimitFor,
   verifyStripeSignature,
@@ -94,6 +95,15 @@ describe('billing configuration', () => {
     for (const status of ['active', 'trialing', 'past_due']) expect(isPaid(status), status).toBe(true);
     for (const status of [null, undefined, 'canceled', 'unpaid', 'incomplete', 'incomplete_expired', 'paused']) {
       expect(isPaid(status), String(status)).toBe(false);
+    }
+  });
+
+  it('treats every subscription Stripe still holds as open, paid or not; only canceled and expired ones are over', () => {
+    for (const status of ['active', 'trialing', 'past_due', 'unpaid', 'incomplete', 'paused', 'some_future_status']) {
+      expect(hasOpenSubscription(status), status).toBe(true);
+    }
+    for (const status of [null, undefined, 'canceled', 'incomplete_expired']) {
+      expect(hasOpenSubscription(status), String(status)).toBe(false);
     }
   });
 
@@ -190,6 +200,34 @@ describe('handleStripeWebhook', () => {
     expect(await (await deliver(checkoutCompleted(account, { mode: 'payment' }))).json()).toMatchObject({ ignored: true });
     await deliver(checkoutCompleted(account, { payment_status: 'unpaid' }));
     expect((await billingRow(account.id)).subscription_status).toBe('incomplete');
+  });
+
+  it('a bank debit (ACH): incomplete at checkout, Pro once Stripe reports the debit cleared', async () => {
+    // Stripe may create the subscription as active before checkout completes, and then sends no
+    // subscription update when the debit clears: checkout.session.async_payment_succeeded is the signal.
+    await deliver(checkoutCompleted(account, { payment_status: 'unpaid' }));
+    expect((await billingRow(account.id)).subscription_status).toBe('incomplete');
+    const cleared = stripeEvent(
+      'checkout.session.async_payment_succeeded',
+      {
+        id: 'cs_test_1',
+        object: 'checkout.session',
+        mode: 'subscription',
+        payment_status: 'paid',
+        client_reference_id: account.id,
+        customer: 'cus_test_1',
+        subscription: 'sub_test_1',
+        customer_details: { email: 'office@example.com' },
+      },
+      minutesLater(3),
+    );
+    const res = await deliver(cleared, { at: minutesLater(3) });
+    expect(await res.json()).toMatchObject({ ok: true, updated: true });
+    expect(await billingRow(account.id)).toEqual({
+      subscription_status: 'active',
+      stripe_customer_id: 'cus_test_1',
+      stripe_subscription_id: 'sub_test_1',
+    });
   });
 
   it('follows the subscription through updates and cancellation', async () => {

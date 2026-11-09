@@ -5,8 +5,8 @@
 //     no snapshots yet? seed them from the baseline (the rules M1–M2 shipped with, before tracking)
 //     per state: fingerprint of the rules' material fields (lastVerified is not material)
 //       same fingerprint → refresh the stored copy silently (a re-verification)
-//       different        → diff → INSERT rule_changes (state, revision + 1) ON CONFLICT DO NOTHING
-//                          → UPDATE rule_snapshots … WHERE revision = old   (compare-and-swap)
+//       different        → diff → one statement: UPDATE rule_snapshots … WHERE revision = old
+//                          (compare-and-swap) + INSERT rule_changes (state, revision + 1) only if it swapped
 //     every change not yet emailed → one email per address with a job in that state
 //       → INSERT rule_change_emails ON CONFLICT (change, address) DO NOTHING → mark the change emailed
 //   The emails go out through the alert sender (alerts.ts), after the deadline alerts.
@@ -253,26 +253,24 @@ export async function syncRuleChanges(
     if (!snapshot && after.length === 0) continue;
     const before = Array.isArray(snapshot?.rules) ? (snapshot.rules as Rule[]) : [];
     const revision = (snapshot?.revision ?? 0) + 1;
-    // The entry first, then the compare-and-swap: a run that stops in between leaves the snapshot
-    // behind, so the next run finds the same change, hits the existing entry and finishes the swap.
+    // One statement: the compare-and-swap of the snapshot, and the entry only if the swap happened.
+    // Either both are stored or neither, so a run that fails leaves the old snapshot and the next run
+    // diffs the rules that are live by then. Of two overlapping runs, only one wins the swap.
+    const params: unknown[] = [state, revision, fingerprint, json, now, opts.rules.version, JSON.stringify(diffRules(before, after))];
+    const swap = snapshot
+      ? `UPDATE rule_snapshots SET revision = $2::int, fingerprint = $3::text, rules = $4::jsonb, updated_at = $5::timestamptz
+          WHERE state = $1::text AND revision = $8::int RETURNING state`
+      : `INSERT INTO rule_snapshots (state, revision, fingerprint, rules, updated_at)
+         VALUES ($1::text, $2::int, $3::text, $4::jsonb, $5::timestamptz)
+         ON CONFLICT (state) DO NOTHING RETURNING state`;
+    if (snapshot) params.push(snapshot.revision);
     const entry = await db.query<ChangeRow>(
-      `INSERT INTO rule_changes (state, revision, rules_version, items, created_at) VALUES ($1, $2, $3, $4::jsonb, $5)
+      `WITH swap AS (${swap})
+       INSERT INTO rule_changes (state, revision, rules_version, items, created_at)
+       SELECT $1::text, $2::int, $6::text, $7::jsonb, $5::timestamptz FROM swap
        ON CONFLICT (state, revision) DO NOTHING RETURNING ${CHANGE_COLUMNS}`,
-      [state, revision, opts.rules.version, JSON.stringify(diffRules(before, after)), now],
+      params,
     );
-    if (snapshot) {
-      await db.query(
-        `UPDATE rule_snapshots SET revision = $2, fingerprint = $3, rules = $4::jsonb, updated_at = $5
-          WHERE state = $1 AND revision = $6`,
-        [state, revision, fingerprint, json, now, snapshot.revision],
-      );
-    } else {
-      await db.query(
-        `INSERT INTO rule_snapshots (state, revision, fingerprint, rules, updated_at) VALUES ($1, $2, $3, $4::jsonb, $5)
-         ON CONFLICT (state) DO NOTHING`,
-        [state, revision, fingerprint, json, now],
-      );
-    }
     if (entry.rows[0]) changes.push(fromChangeRow(entry.rows[0], opts.rules.states));
   }
 
