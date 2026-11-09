@@ -1,4 +1,4 @@
-import { FREE_JOB_LIMIT, PRO_PRICE_LABEL, billingFrom, checkoutUrl } from '@/lib/billing';
+import { FREE_JOB_LIMIT, PRO_PRICE_LABEL, billingFrom, checkoutUrl, hasOpenSubscription } from '@/lib/billing';
 import { computeDeadlines, pendingRules } from '@/lib/deadlines';
 import { parseJobForm, type JobForm } from '@/lib/jobInput';
 import { SUPPORTED_STATES } from '@/lib/rules';
@@ -54,12 +54,22 @@ export default async function CalculatorPage({ searchParams }: { searchParams: S
               {first(params.limit) && (
                 <p className="error" role="alert">
                   {`Your Free plan tracks ${FREE_JOB_LIMIT} job, and it’s in use. `}
-                  {billing ? (
-                    <a href={checkoutUrl(billing, account)}>{`Subscribe to Pro (${PRO_PRICE_LABEL})`}</a>
+                  {billing && hasOpenSubscription(account.subscriptionStatus) ? (
+                    // Stripe still holds a subscription (payment pending or on hold): no second checkout.
+                    <>
+                      Your Pro subscription isn’t active yet: <a href="/jobs#plan">see your plan</a>. Or delete a job you no
+                      longer need.
+                    </>
                   ) : (
-                    'Subscribe to Pro'
+                    <>
+                      {billing ? (
+                        <a href={checkoutUrl(billing, account)}>{`Subscribe to Pro (${PRO_PRICE_LABEL})`}</a>
+                      ) : (
+                        'Subscribe to Pro'
+                      )}
+                      {' to save this one, or delete a job you no longer need.'}
+                    </>
                   )}
-                  {' to save this one, or delete a job you no longer need.'}
                 </p>
               )}
             </>

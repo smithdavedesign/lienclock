@@ -2,7 +2,147 @@
 
 ## Plan
 
-Milestone: **M3 — Billing and more states**, run 2 of 2 in this MVP session (M2, then M3).
+Milestone: **M3 — Billing and more states**, the only milestone of this MVP session (1 of 1),
+built tests first. Planned with gstack plan-eng-review ("Step 0: Scope Challenge",
+"1. Architecture review", "3. Test review"). Nobody answers questions in this run, so I answered
+each one myself and wrote the answer down here.
+
+Exit criterion (ROADMAP M3): **a rules change creates a changelog entry and queues emails only
+for jobs in that state.**
+
+### Where M3 stood when this run started
+
+- **M3 was already built and committed.** The previous session ran M2 and then M3 and committed
+  both as "MVP: lienclock (M2)" (`1a48e42`): 16 states, Stripe Payment Link billing, the rules
+  changelog with emails, the og:image and terms §6. Its plan is kept below as "M3 plan, run 1".
+- At the start of this run, `npm ci` and `npm test` gave **540 passing tests in 23 files**,
+  M3-EC1 included. `.provision` was gone: the pipeline consumes it after each build.
+- `docs/screenshots/` held 8 PNGs, 2 more than the limit. The `home-*` pair was left over from M2,
+  because the earlier run wasn't allowed to delete files.
+
+### Step 0 — Scope challenge
+
+1. **What already solves it?** All of M3. The exit criterion has two tests (M3-EC1 at the library
+   level and end to end through the cron). So this run doesn't rebuild anything. It re-proves the
+   criterion with my own mutation checks and fixes the real defects left in the M3 code. To find
+   them I re-read the earlier review's open items and ran an independent read-only review of the
+   billing and changelog code. It also refreshes the proof: the screenshots, `.provision` and
+   these notes.
+2. **Minimum change set.** Each item is a defect in M3 code, not a feature:
+   - **Deleting an account while a subscription is still open** (TOCTOU, plus incomplete status
+     handling). The check sat in the action only, outside the DELETE, and only covered "paid"
+     statuses. A subscriber in `unpaid`, `paused` or `incomplete` could delete their account
+     while Stripe kept the subscription. Fix: one `hasOpenSubscription` rule (open = any status
+     except `canceled` and `incomplete_expired`), enforced inside the DELETE statement.
+   - **Bank-debit (ACH) payers stuck on Free.** `checkout.session.completed` with
+     `payment_status: unpaid` records `incomplete`. When the debit clears, Stripe sends
+     `checkout.session.async_payment_succeeded`, and no subscription update follows if the
+     subscription was already `active`. The handler wasn't wired, so the account stayed capped.
+     Fix: route that event to the checkout handler.
+   - **A second subscription offered while one is still open.** The dashboard and the
+     calculator's limit message showed "Subscribe to Pro" during `incomplete`, `unpaid` and
+     `paused`, which invited a second $29 subscription. For `unpaid` and `paused` they also said
+     "has ended". Fix: no checkout link while a subscription is open; `unpaid` and `paused` say
+     "on hold" and link to the portal.
+   - **Changelog entry and snapshot move were two statements.** A run that died between them,
+     followed by another rules edit, reused the orphaned entry's revision. The emails would then
+     describe rules that were no longer live. Fix: one statement (CTE), where the entry is
+     inserted only if the compare-and-swap moved the snapshot.
+   - The screenshot script runs the cron *after* the sample jobs exist and asserts it queued
+     exactly 4 rule-change emails (the account's 4 states, none for the other 6). It also
+     removes PNGs it no longer produces, so the folder holds exactly the 6 it writes.
+   - Recreate `.provision`, adding the new webhook event to the Stripe request.
+   - **Deliberately NOT in this run:**
+     - an annual plan, a Stripe API key, NC/MI, and the "doesn't apply" switch (all in What's
+       left, as before);
+     - an exact Free-plan limit under simultaneous saves on Neon. That needs a transaction API
+       in `Db`, and PGlite runs one statement at a time, so no test here could show the race;
+     - handling two Stripe events from the same second delivered out of order;
+     - a pre-click Free-limit warning on the intake page (no data is lost: the email stays
+       waiting for review).
+3. **Complexity check:** 7 source files (`auth.ts`, `billing.ts`, `changelog.ts`, `actions.ts`,
+   `jobs/page.tsx`, `page.tsx`, `scripts/screenshots.mjs`) plus `.env.example`, `.provision` and
+   4 test files. No new module, class or service, and no new dependency. The file count is
+   just above the "8 files" smell, because one rule (open subscription) must hold everywhere
+   it's used: the DELETE, the action, the dashboard and the calculator. I proceed as is.
+4. **Search check:** WebSearch wasn't needed for code patterns. I used in-distribution
+   knowledge, cross-checked by the review agent against Stripe's ACH subscription docs:
+   - Stripe's subscription statuses are `incomplete`, `incomplete_expired`, `trialing`,
+     `active`, `past_due`, `canceled`, `unpaid` and `paused`. Only `canceled` and
+     `incomplete_expired` are terminal.
+   - Delayed payment methods complete checkout as `unpaid` and then send
+     `checkout.session.async_payment_succeeded` or `…_failed`.
+   - Postgres re-checks an `UPDATE`/`DELETE` `WHERE` against the newest row version after
+     waiting for a row lock (READ COMMITTED), so a guard inside the statement sees a concurrent
+     webhook's write. **[Layer 1]**
+   - A data-modifying CTE commits with its statement or not at all. **[Layer 1]**
+5. **TODOS cross-reference:** there is no TODOS.md. Of the M3 run-1 review's open items, the
+   deletion race is fixed here. The stale `home-*` PNGs are removed by the script. The Free-limit
+   race and the same-second ordering stay open, with reasons.
+6. **Completeness:** the open-subscription rule covers every Stripe status, including unknown
+   future ones (treated as open, which fails safe: deletion is refused and the portal shown). The
+   ACH path covers both orders: checkout before or after the subscription events.
+7. **Distribution:** no new artifact; same Vercel app.
+
+### 1 — Architecture (this run's changes)
+
+```
+ deleteAccountAction ── hasOpenSubscription(session status)? → "cancel first"   (fast path, message)
+   └─▶ deleteAccount: DELETE FROM accounts WHERE id = $1
+                        AND (subscription_status IS NULL OR status = ANY('{canceled,incomplete_expired}'))
+         0 rows + account still there → 'subscribed' → "cancel first"            (the real guard)
+         (a webhook that set 'active' a moment earlier wins: Postgres re-checks the WHERE)
+
+ Stripe ─▶ /api/stripe/webhook
+   checkout.session.completed              (paid → active, unpaid → incomplete)
+   checkout.session.async_payment_succeeded ─▶ same handler (payment_status paid → active)   NEW
+   customer.subscription.*                  (by subscription id, unchanged)
+
+ Plan section / calculator limit message
+   paid (active, trialing, past_due) → Pro          open but unpaid → no checkout link:
+   null / canceled / incomplete_expired → Subscribe     incomplete → "still confirming"
+                                                        unpaid, paused, unknown → "on hold" + portal
+
+ syncRuleChanges, per changed state — one statement:
+   WITH swap AS (UPDATE rule_snapshots … WHERE state = $1 AND revision = old RETURNING state)
+   INSERT INTO rule_changes … SELECT … FROM swap ON CONFLICT DO NOTHING RETURNING …
+   (a brand-new state: swap = INSERT rule_snapshots … ON CONFLICT (state) DO NOTHING RETURNING state)
+```
+
+- **Boundaries:** unchanged. The open-subscription rule lives in `billing.ts` and is used by
+  `auth.ts`, the action and both pages. The SQL guard reads the same `ENDED_SUBSCRIPTION_STATUSES`
+  constant.
+- **Failure scenarios, each one handled:**
+  - **Someone pays in another tab while deleting:** the DELETE matches nothing, the page says
+    "cancel first", and the account and its jobs stay.
+  - **ACH debit fails later:** Stripe moves the subscription (`past_due`, `canceled` or
+    `incomplete_expired`) and sends `customer.subscription.*`. The account already holds the
+    subscription id, so those events land.
+  - **The sync statement fails** (a database error mid-run): nothing is written for that state.
+    The cron logs it and still sends alerts. The next run diffs against the last recorded rules.
+  - **Two runs at once:** only one wins the swap, so there's one entry (the existing
+    three-way concurrency test still passes).
+- **Security:** no new input surface. The webhook accepts one more event type through the
+  same signature check and the same field validation.
+
+### 3 — Test plan (vitest, `npm test`), written before the code
+
+Each test below was run and failed before its fix, except the `hasOpenSubscription` unit test,
+which I wrote just after the helper (the deletion tests that need it had already failed):
+
+| Item | Test |
+|---|---|
+| **Exit criterion** (already passing) | `test/m3-exit-criteria.test.ts` M3-EC1, both variants. Re-proved here by mutation: with `OR true` added to the recipient query's state filter, both fail (4 addresses emailed instead of 3). |
+| Deletion guard in the statement | `test/auth.test.ts`: `deleteAccount` returns `'subscribed'` and keeps the jobs for active, trialing, past_due, unpaid, incomplete, paused and an unknown status. It deletes for incomplete_expired and canceled. Mutation (guard removed from the DELETE) → fails. |
+| Deletion from the page | `test/m3-app.test.tsx`: `unpaid` → `delete-subscribed`, account kept, "cancel it first" without "still active". |
+| `hasOpenSubscription` | `test/billing.test.ts`: every status, null and undefined. |
+| ACH | `test/billing.test.ts`: checkout `unpaid` → `incomplete`, then signed `checkout.session.async_payment_succeeded` → `active` with both Stripe ids. |
+| No second checkout | `test/m3-app.test.tsx`: `incomplete`, `unpaid` and `paused` → no `buy.stripe.com` link and not "has ended". `unpaid` and `paused` → "on hold in Stripe" + portal link. `canceled` and `incomplete_expired` → "has ended" + subscribe link. The calculator's limit message for `unpaid` links `/jobs#plan`, not a checkout. |
+| Atomic changelog write | `test/changelog.test.ts`: a trigger makes the snapshot move fail. The sync throws and leaves **no** entry (before the fix, 1 orphan). After another edit, the next run records 90 → 45 days (not 60) and emails that. |
+
+## M3 plan, run 1 (done)
+
+Milestone: **M3 — Billing and more states**, run 2 of 2 in the previous MVP session (M2, then M3).
 Planned with gstack plan-eng-review ("Step 0: Scope Challenge", "1. Architecture review",
 "3. Test review"). Nobody answers questions in this run, so I answered each one myself and
 wrote the answer down here.
@@ -500,7 +640,25 @@ Plus every other codepath:
 
 ## What the product does now (end of M3: the MVP)
 
-New in M3:
+Changed in this run (M3, run 2: fixes, no new features):
+
+- **Deleting an account is refused while Stripe still holds a subscription**, in any state that
+  can still charge or resume: active, trialing, past_due, unpaid, incomplete, paused (and any
+  status Stripe adds later). The check runs inside the DELETE statement itself, so a payment
+  completing in another tab can't slip between check and delete. Canceled and expired
+  subscriptions don't block deletion.
+- **Bank-debit (ACH) payments switch the account to Pro when the debit clears**
+  (`checkout.session.async_payment_succeeded`). Until then the dashboard says Stripe is still
+  confirming the first payment.
+- **No second checkout while a subscription is open.** While the first payment is confirming,
+  or a subscription is unpaid or paused, the dashboard and the calculator's "Free plan is full"
+  message show no Subscribe link. Unpaid and paused say "on hold in Stripe until a payment goes
+  through" and link to the billing portal. "Has ended", with a Subscribe link, appears only for
+  canceled or expired subscriptions.
+- **The changelog entry and the stored rules move together** (one statement), so a failed run
+  can't leave an entry that later describes rules that aren't live.
+
+New in M3 (run 1):
 
 - **16 states.** CA, TX, FL, WA, AZ, NV (M1), plus **CO, GA, IL, MN, NJ, NY, OH, PA, UT,
   VA** (17 new rules, 28 in all; the state picker is alphabetical).
@@ -602,7 +760,7 @@ From M1–M2, with M3 changes noted:
 
 ```bash
 npm install            # works with npm_config_ignore_scripts; no new dependencies in M2 or M3
-npm test               # 540 vitest tests in 23 files, ~60–90 s (embedded Postgres boots per DB test file)
+npm test               # 547 vitest tests in 23 files, ~25–90 s (embedded Postgres boots per DB test file)
 npm run typecheck
 npm run dev            # http://localhost:3000, no env vars needed (/changelog, /terms, /privacy, /robots.txt, /sitemap.xml too)
 npm run build && npm start
@@ -655,7 +813,12 @@ downloads a browser. Each view is captured at 1280×800 and on an iPhone 13 (vie
      account id from that link, as Stripe would after payment;
   4. it saves jobs in OH, CO and GA.
 - `changelog-*`: `/changelog` after the first cron run (the script calls
-  `/api/cron/alerts`). It shows the rules added since the M1 rules, per state.
+  `/api/cron/alerts` once the 4 jobs exist). It shows the rules added since the M1 rules, per
+  state. The script also checks the exit criterion live: the run must queue exactly **4**
+  rule-change emails, one per changed state where the account has a job (PA, OH, CO, GA), and
+  none for the other 6 states. Otherwise it fails.
+- At the end it **removes any other PNG in `docs/screenshots/`**, so older views don't pile up
+  (this removed M2's `home-*` pair).
 
 It is not part of `npm test`.
 
@@ -703,8 +866,8 @@ It is not part of `npm test`.
    - create a **Payment Link** for it, with "After payment → redirect" set to
      `https://<production host>/jobs?billing=success`;
    - add a **webhook endpoint** `https://<production host>/api/stripe/webhook` for
-     `checkout.session.completed`, `customer.subscription.updated` and
-     `customer.subscription.deleted`;
+     `checkout.session.completed`, `checkout.session.async_payment_succeeded` (bank debits that
+     clear later), `customer.subscription.updated` and `customer.subscription.deleted`;
    - turn on the **customer portal** with "cancel at end of billing period", the default and
      what terms §6 promises.
 
@@ -728,13 +891,26 @@ month, with received mail counting toward the quota). Stripe has no fixed cost.
 
 | # | Exit criterion (ROADMAP M3) | Status |
 |---|---|---|
-| 1 | A rules change creates a changelog entry and queues emails only for jobs in that state | ✅ pass: `test/m3-exit-criteria.test.ts` M3-EC1. A Texas rule edit → exactly one TX entry with the before → after deadline. It queues 3 emails (TX-only account, CA+TX account, M1-era TX job), none for the CA-only account, and each lists only that address's TX jobs. A rerun adds nothing. The end-to-end variant goes through the cron route and sends exactly those 3 through a stubbed Resend. |
+| 1 | A rules change creates a changelog entry and queues emails only for jobs in that state | ✅ pass: `test/m3-exit-criteria.test.ts` M3-EC1. A Texas rule edit → exactly one TX entry with the before → after deadline. It queues 3 emails (TX-only account, CA+TX account, M1-era TX job), none for the CA-only account, and each lists only that address's TX jobs. A rerun adds nothing. The end-to-end variant goes through the cron route and sends exactly those 3 through a stubbed Resend. Also checked live by `npm run screenshots` (4 emails for the account's 4 changed states, 0 for the other 6). |
 
-The exit-criterion tests failed before the code existed (`Cannot find package '@/lib/changelog'`).
-To check they aren't vacuous I made two mutations and reverted both:
-1. dropping the state filter from the recipient query made both M3-EC1 tests fail ("expected
-   4 addresses, got 3");
+The exit-criterion tests failed before the code existed in run 1 (`Cannot find package
+'@/lib/changelog'`). To check they aren't vacuous, run 1 made two mutations and reverted both:
+1. dropping the state filter from the recipient query made both M3-EC1 tests fail (4 addresses
+   instead of 3);
 2. putting `lastVerified` back into the fingerprint made the re-verification test fail.
+
+This run repeated mutation 1 (`WHERE state = $1 OR true`). Both M3-EC1 tests failed, and I
+reverted it. A mutation of the new deletion guard (taking it out of the DELETE) made its test fail;
+reverted too.
+
+Run 2 fixes (each test failed before its fix; see the Plan's test table):
+
+| Fix | Status |
+|---|---|
+| Deletion refused for every open Stripe subscription, inside the DELETE | ✅ `test/auth.test.ts` (2 tests), `test/m3-app.test.tsx` (1) |
+| ACH payments reach Pro (`checkout.session.async_payment_succeeded`) | ✅ `test/billing.test.ts` |
+| No second checkout while a subscription is open; "on hold" + portal for unpaid/paused | ✅ `test/m3-app.test.tsx` (1 new, 1 extended), `test/billing.test.ts` (`hasOpenSubscription`) |
+| Changelog entry and snapshot written in one statement | ✅ `test/changelog.test.ts` |
 
 M3 deliverables:
 
@@ -791,8 +967,9 @@ REVENUE.md "before charging", all done now:
 | 5 | A job 7 days before a deadline enqueues exactly one 7-day alert, none duplicated on rerun | ✅ pass (EC5) |
 | 6 | Every returned deadline includes a non-empty citation URL and last-verified date | ✅ pass (EC6) |
 
-`npm test` passes: **540 tests in 23 files**. The 394 tests from before M3 still pass
-(five changed as listed above), and 146 are new:
+`npm test` passes: **547 tests in 23 files** (run 2 added 7 and extended 1; none were deleted
+or loosened). After M3 run 1 there were 540: the 394 tests from before M3 still passed (five
+changed as listed above), and 146 were new:
 - `m3-exit-criteria` 2;
 - `changelog` 22;
 - `billing` 30;
@@ -807,21 +984,22 @@ REVENUE.md "before charging", all done now:
 ## Infrastructure
 
 Requested in `.provision`. No secret values appear anywhere in the repo; code reads them from env.
-`.provision` was missing from the repo at the start of M2 run 2, which recreated it with every
-line below; M3 adds the Stripe line. Lines that were already provisioned for the live M1
-deploy should be no-ops for the broker.
+The pipeline consumes `.provision` after each build, so this run (M3, run 2) recreated it with
+every line the app needs. Each `request` line says "skip if already done", because the earlier
+runs asked for the same things and some may already be in place. The `neon` and `vercel
+project` lines should be no-ops for an existing database and project. The only new content is
+`checkout.session.async_payment_succeeded` in the Stripe webhook's event list.
 
 | Line | Gives | Used by |
 |---|---|---|
 | `neon db lienclock` | `DATABASE_URL` (Neon Postgres, free) | `src/lib/db.ts` |
 | `vercel project lienclock` | Vercel Hobby project with the stored values as env | deploy + cron |
 | `request "CRON_SECRET …"` (M1) | random bearer secret for the cron route | `src/lib/cron.ts` (fails closed) |
-| `request "Resend API key …"` (M1) | `RESEND_API_KEY` (free tier) | alert emails |
-| `request "Full-access Resend API key …"` (M2) | the same `RESEND_API_KEY`, with full access | sign-in emails (`src/lib/auth.ts`) and reading received mail (`src/lib/inbound.ts`) |
-| `request "Resend Inbound webhook …"` (M2) | `RESEND_WEBHOOK_SECRET` (secret) and `INTAKE_EMAIL_DOMAIN` (not secret) | `/api/intake/email` (fails closed) and the dashboard's forwarding address |
+| `request "Full-access Resend API key …"` (M1, full access since M2) | `RESEND_API_KEY` (free tier) | alert, sign-in and rule-change emails (`src/lib/alerts.ts`, `src/lib/auth.ts`) and reading received mail (`src/lib/inbound.ts`) |
+| `request "Sending domain …"` (M3) | `ALERT_FROM_EMAIL` (not secret) on a subdomain of a domain RepoHQ already owns, verified in the existing Resend account ($0; free plan allows one domain) | every email reaching people other than the Resend account owner |
+| `request "Stripe billing …"` (M3; event list updated in run 2) | A Stripe account (no monthly fee): the LienClock Pro product at US$29/month, its Payment Link (`STRIPE_PAYMENT_LINK`, not secret), a webhook endpoint for `checkout.session.completed`, `checkout.session.async_payment_succeeded` and `customer.subscription.updated`/`deleted` (`STRIPE_WEBHOOK_SECRET`, secret), and the customer portal (`STRIPE_PORTAL_URL`, not secret) | `src/lib/billing.ts`: the subscribe link, the job limit, `/api/stripe/webhook` (fails closed) and "Manage billing or cancel". Billing stays off until the link and the secret are both set. |
+| `request "Resend Inbound …"` (M2) | `RESEND_WEBHOOK_SECRET` (secret) and `INTAKE_EMAIL_DOMAIN` (not secret) | `/api/intake/email` (fails closed) and the dashboard's forwarding address |
 | `request "Support address …"` (M2) | `CONTACT_EMAIL` (not secret): the address for privacy and support requests | the contact line on `/privacy` and `/terms` (`src/lib/site.ts`, shown only if it's a plain address) |
-| `request "Sending domain …"` (**M3**) | `ALERT_FROM_EMAIL` (not secret) on a subdomain of a domain RepoHQ already owns, verified in the existing Resend account ($0; free plan allows one domain) | every email (sign-in links, alerts, rule-change emails) reaching people other than the Resend account owner |
-| `request "Stripe billing …"` (**M3**) | A Stripe account (no monthly fee): the LienClock Pro product at US$29/month, its Payment Link (`STRIPE_PAYMENT_LINK`, not secret), a webhook endpoint for `checkout.session.completed` and `customer.subscription.updated`/`deleted` (`STRIPE_WEBHOOK_SECRET`, secret), and the customer portal (`STRIPE_PORTAL_URL`, not secret) | `src/lib/billing.ts`: the subscribe link, the job limit, `/api/stripe/webhook` (fails closed) and "Manage billing or cancel". Billing stays off until the link and the secret are both set. |
 
 No Stripe API key is requested: payment goes through a Payment Link and the portal, and only
 the webhook's signing secret reaches the app. M3 needs no other new service, because the
@@ -831,7 +1009,33 @@ Optional, not secret: `ALERT_FROM_EMAIL`, `APP_URL`, `CONTACT_EMAIL`, `STRIPE_PO
 
 ## Decisions made without asking (non-interactive run)
 
-M3 (this run):
+M3, run 2 (this run):
+- **Verify and fix, don't rebuild.** M3 was already in the repo and tested. Rewriting working
+  code would be churn. This run re-proved the exit criterion and fixed the defects found in
+  review, each with a test that failed first.
+- **"Open subscription" is anything Stripe hasn't ended.** Only `canceled` and
+  `incomplete_expired` count as over. An unknown future status counts as open, which fails
+  safe: deletion is refused and the portal shown, rather than letting someone delete an
+  account that's still billed.
+- **`unpaid`/`paused` keep the Free limit but are "on hold", not "ended".** No new jobs beyond 1
+  until a payment goes through, and the way back is the portal (updating the card resumes the
+  same subscription), not a second checkout.
+- **`checkout.session.async_payment_failed` isn't handled.** When a debit fails, Stripe moves the
+  subscription itself (`past_due`, `canceled` or `incomplete_expired`) and sends a
+  `customer.subscription.*` event. The account already has the subscription id by then, so that
+  event lands. Recording "failed" from the checkout event would only race it.
+- **A second subscription is prevented in the UI, not reconciled in the webhook.** If someone
+  still pays twice (two Payment Link tabs), the account follows the newest checkout. Stripe's
+  dashboard shows both, and David refunds one (What's left). Tracking several subscriptions per
+  account isn't worth it at this scale.
+- **The screenshot script owns `docs/screenshots/`.** It deletes PNGs it didn't write in that
+  run. That keeps the folder at the 6 the README shows, and it's how M2's stale `home-*` pair
+  went away. This session's permission mode refuses `rm` from the shell.
+- **The screenshots stay deadlines / Pro dashboard / changelog.** The calculator result *is* the
+  start page (`/`) after the core action, so "start page, core action, result" fits in one
+  view. That leaves room for M3's two features: billing and the changelog.
+
+M3, run 1:
 - **Which 10 states.** I took the largest construction markets after the M1 six, keeping only
   states whose rules the status model can show truthfully. **In: CO, GA, IL, MN, NJ, NY, OH,
   PA, UT, VA. Out: NC and MI.**
@@ -1011,7 +1215,7 @@ M1 (unchanged):
 
 ## What's left
 
-ROADMAP M1–M3 are built. Remaining, most important first:
+ROADMAP M1–M3 are built, and every exit criterion passes. Remaining, most important first:
 
 - **Launch blockers outside the code:**
   - **A sending identity that reaches real users.** Resend's shared sender only delivers to
@@ -1027,9 +1231,9 @@ ROADMAP M1–M3 are built. Remaining, most important first:
   - **Attorney review** of the 28 rules (the 17 M3 rules were checked only against quoted
     statute text) and of `/terms` (now including §6 billing) and `/privacy`: governing law,
     the liability cap, the operator's legal name, sales tax on SaaS.
-  - **Delete `docs/screenshots/home-desktop.png` and `home-mobile.png`.** They're M2's
-    screenshots, no longer produced or linked. This session's permission mode refused `rm`,
-    so the caller should delete them before committing to stay at 6 PNGs.
+  - **Add `checkout.session.async_payment_succeeded`** to the Stripe webhook's events if the
+    endpoint was already created from the run-1 instructions (Deploy, step 6). Without it,
+    bank-debit payers stay on Free until a later subscription event.
 - **Billing:**
   - an annual plan ($290/year, REVENUE.md) as a second Payment Link;
   - a `STRIPE_SECRET_KEY` integration if needed later: cancel on account deletion,
@@ -1037,6 +1241,10 @@ ROADMAP M1–M3 are built. Remaining, most important first:
   - an email when a payment fails (Stripe can send its own).
   - The "subscribe, add many jobs, cancel" pattern is tolerated (tracked jobs keep alerts).
     Revisit if it's abused.
+  - An exact Free-plan limit under simultaneous saves on Neon (a `Db.transaction` with a
+    per-account lock). Today a double submit can save a second Free job.
+  - Two subscriptions on one account (someone paying in two tabs): the account follows the
+    newer checkout, and the older one is refunded by hand in Stripe.
 - **Rules:**
   - NC and MI, which need a third late-notice outcome: "valid unless a buyer/lender recorded
     first" (NC), "reduced by payments made before the notice" (MI);
@@ -1062,7 +1270,92 @@ ROADMAP M1–M3 are built. Remaining, most important first:
 
 ## Review
 
-### M3 (this run)
+### M3, run 2 (this run)
+
+Two passes, both against gstack's checklist (Pass 1 CRITICAL, Pass 2 INFORMATIONAL) with the
+Fix-First heuristic. Nobody answers questions in this run, so I made the "ASK" calls myself.
+1. Before writing code: an independent read-only review of the M3 code already committed
+   (billing, webhook, changelog, job limit, deletion), plus my own read of run 1's open items.
+   This pass found the defects this run fixes.
+2. After: my own diff (`git status`, `git diff`; `.provision` is the only untracked file).
+
+**Fixed (found in pass 1; each has a test that failed first)**
+- [P2] (confidence: 9/10) `src/lib/auth.ts` `deleteAccount` / `src/app/actions.ts`. This is
+  the checklist's TOCTOU item, and its enum-completeness item too. The subscription check ran
+  in the action, outside the DELETE, and covered only paid statuses. An `unpaid`, `paused` or
+  `incomplete` subscriber could delete their account while Stripe kept the subscription, and so
+  could a payment completing between check and delete. Now the guard is inside the DELETE,
+  using one rule (`hasOpenSubscription`: anything but `canceled`/`incomplete_expired`).
+- [P2] (confidence: 8/10) `src/lib/billing.ts`. Bank-debit (ACH) payers stayed on Free:
+  `checkout.session.async_payment_succeeded` wasn't handled, and Stripe sends no subscription
+  update when an already-active subscription's first debit clears. It's now routed to the
+  checkout handler, and the Deploy steps and `.provision` list the event.
+- [P3] (confidence: 8/10) `src/app/jobs/page.tsx`, `src/app/page.tsx`. "Subscribe to Pro" was
+  offered while Stripe still held a subscription (`incomplete`, `unpaid`, `paused`), inviting
+  a second $29 subscription, and `unpaid`/`paused` said "has ended". There's no checkout link
+  while a subscription is open now; "on hold" + portal for unpaid/paused.
+- [P3] (confidence: 7/10) `src/lib/changelog.ts`. The changelog entry and the snapshot move
+  were two statements. A failure between them, then another rules edit, left an entry (and
+  emails) describing rules that were never live together. Now they're one statement (a CTE):
+  the entry exists only if the compare-and-swap moved the snapshot.
+
+**CRITICAL in this run's own diff: none.**
+- **SQL & data safety:** every value is a parameter. The new interpolations are the two
+  constant `swap` fragments in `changelog.ts`, chosen by a branch and never from input, and
+  the existing constant `CHANGE_COLUMNS`. The terminal-status list goes in as `$2::text[]`.
+  Unused-parameter typing is avoided: the old revision is `$8`, passed only on the UPDATE
+  branch.
+- **Races:**
+  - deletion and the subscription check are one statement;
+  - the changelog write is one statement, and the existing three-way overlapping-sync test
+    still records one entry and one email;
+  - the extra `SELECT` after a refused delete only picks the message ("subscribed" vs
+    "no such account"). Accounts never reappear, so it can't misreport a deleted account
+    as kept.
+- **XSS:** none. The new portal links use the https-validated `STRIPE_PORTAL_URL`, and all text
+  goes through React.
+- **Enum completeness** (every consumer of `subscriptionStatus` read):
+  - `isPaid` (job limit, Pro section) is unchanged;
+  - `hasOpenSubscription` is used by the delete action and statement, the Plan section and the
+    calculator's limit message;
+  - each status has exactly one message: Pro (active/trialing/past_due), confirming
+    (incomplete), on hold (unpaid/paused/unknown), ended (canceled/incomplete_expired), Free
+    (null);
+  - the new webhook event reuses a handler that already validates `mode`, `payment_status`,
+    the ids and the email.
+- **Secrets:** none. `.provision` holds only requests. The screenshot script still makes up its
+  cron and webhook secrets at runtime and never prints them.
+
+**INFORMATIONAL: auto-fixed:** stale comments that the fixes contradicted (the `changelog.ts`
+header diagram, the `deleteAccount` doc comment, the billing header) were updated.
+
+**Left open (recorded, not fixed)**
+- [P2] (confidence: 8/10) No sending identity yet, so emails reach only the Resend account
+  owner. This is a launch blocker outside the code (requested in `.provision`).
+- [P3] (confidence: 7/10) `src/lib/jobs.ts` `createJob`: simultaneous saves by one Free account
+  on Neon can still create a second job. Making it exact needs a `Db.transaction` with a
+  per-account lock, and PGlite can't reproduce the race in a test. The cost is one extra free
+  job.
+- [P3] (confidence: 6/10) Medium confidence, verify. If Stripe never reported a lapsed first
+  payment (`incomplete` → `incomplete_expired`), the account would keep showing "still
+  confirming" with no Subscribe link. It still gets "Manage billing or cancel", and David can
+  fix the status by hand (Deploy, step 7). Stripe does send `customer.subscription.updated`
+  for that transition, and the account holds the subscription id by then.
+- [P3] (confidence: 5/10) Medium confidence, verify. An entry left behind by run 1's
+  two-statement code (only if that code ran in production *and* crashed in that window) would
+  collide with the next revision. The new statement then moves the snapshot and records
+  nothing, the same outcome run 1 had. New code can't create such orphans.
+- [P3] (confidence: 5/10) Medium confidence, verify. Two Stripe events for one subscription in
+  the same second, delivered out of order: the later delivery wins, and a later event corrects
+  it (unchanged from run 1).
+- [P3] Two subscriptions on one account (paying in two tabs at once): the account follows the
+  newer checkout, and David refunds the other (What's left).
+- [P3] Unchanged from run 1: rule-change emails at most 50 a day after alerts; any material
+  edit (a note's wording included) emails everyone tracking a job in that state; changes
+  appear at the next daily cron, not at deploy; the intake review page doesn't pre-warn about
+  the Free limit.
+
+### M3, run 1
 
 I reviewed this run's diff (`git status` and `git diff`, plus the new untracked files; the tree
 also still holds M2 run 2's uncommitted changes) against gstack's checklist, Pass 1 CRITICAL
@@ -1128,8 +1421,8 @@ so I made the "ASK" calls myself.
 - [P3] (confidence: 7/10) `src/lib/jobs.ts` `createJob` with a limit: simultaneous saves by one
   Free account on Neon can overshoot by the number in flight, the same caveat as M2's rate
   limits. An advisory lock per account would make it exact.
-- [P3] (confidence: 6/10) Medium confidence, verify. `deleteAccountAction` reads the
-  subscription status with the session, then deletes. A checkout completing in that same
+- **(Fixed in run 2.)** [P3] (confidence: 6/10) Medium confidence, verify. `deleteAccountAction`
+  reads the subscription status with the session, then deletes. A checkout completing in that same
   instant (paying in another tab) would delete a just-paid account. The webhook then matches
   nothing and logs it, and David refunds by hand. A `WHERE subscription_status NOT IN (…)`
   guard in the DELETE would close it, but then the action has to tell "refused" from
@@ -1144,7 +1437,8 @@ so I made the "ASK" calls myself.
 - [P3] Changes reach `/changelog` and inboxes at the next daily cron, not at deploy.
 - [P3] The intake review page doesn't warn about the Free limit before "Confirm"; the refusal
   comes after the click, and the email stays waiting for review.
-- [P3] `docs/screenshots/home-*.png` are stale (see What's left): the sandbox refused `rm`.
+- **(Fixed in run 2: the screenshot script now removes them.)** [P3] `docs/screenshots/home-*.png`
+  are stale: the sandbox refused `rm`.
 
 ### M2, run 2
 

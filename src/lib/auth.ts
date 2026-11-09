@@ -9,6 +9,7 @@
 // Raw tokens exist only in the email and the cookie; the database keeps their SHA-256.
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { resendSender } from './alerts';
+import { ENDED_SUBSCRIPTION_STATUSES } from './billing';
 import { DEFAULT_FROM, appUrlFrom, type CronEnv } from './cron';
 import type { Db } from './db';
 import type { JobInput } from './deadlines';
@@ -116,20 +117,29 @@ export async function rotateFeedToken(db: Db, accountId: string): Promise<Accoun
  * Deletes the account and everything it owns in one statement. The FK cascades take its sessions,
  * jobs (and their alerts) and intake proposals. The statement also removes its unused sign-in
  * links, the rule-change emails queued or sent to its address, and M1-era account-less jobs that
- * still alert the same (now verified) address. False if there was no such account. It doesn't
- * cancel a Stripe subscription: the app refuses to delete a subscribed account (billing.ts).
+ * still alert the same (now verified) address. False if there was no such account.
+ *
+ * It can't cancel a Stripe subscription, so it refuses ('subscribed') while one is still open. That
+ * check is in the DELETE itself: a checkout completing after the caller looked at the account still
+ * keeps it (Postgres re-checks the WHERE against the row the webhook just updated).
  */
-export async function deleteAccount(db: Db, accountId: string): Promise<boolean> {
+export async function deleteAccount(db: Db, accountId: string): Promise<boolean | 'subscribed'> {
   if (!isUuid(accountId)) return false;
   const { rows } = await db.query(
-    `WITH gone AS (DELETE FROM accounts WHERE id = $1 RETURNING email),
+    `WITH gone AS (DELETE FROM accounts
+                    WHERE id = $1 AND (subscription_status IS NULL OR subscription_status = ANY($2::text[]))
+                    RETURNING email),
           links AS (DELETE FROM login_tokens WHERE email IN (SELECT email FROM gone)),
           notices AS (DELETE FROM rule_change_emails WHERE to_email IN (SELECT email FROM gone)),
           legacy AS (DELETE FROM jobs WHERE account_id IS NULL AND lower(alert_email) IN (SELECT email FROM gone))
      SELECT email FROM gone`,
-    [accountId],
+    [accountId, ENDED_SUBSCRIPTION_STATUSES],
   );
-  return rows.length > 0;
+  if (rows.length > 0) return true;
+  // Not deleted: either there was no such account, or the guard kept it. Accounts never come back,
+  // so one that still exists was kept for its subscription.
+  const { rows: kept } = await db.query('SELECT 1 FROM accounts WHERE id = $1', [accountId]);
+  return kept.length > 0 ? 'subscribed' : false;
 }
 
 export type StartSignIn = { ok: true; token: string; email: string } | { ok: false; error: 'invalid_email' | 'rate_limited' };

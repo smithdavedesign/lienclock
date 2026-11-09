@@ -11,7 +11,7 @@
 // are never opened. All job data below is made up, and dates are relative to today.
 import { spawn } from 'node:child_process';
 import { createHmac, randomBytes } from 'node:crypto';
-import { mkdir, rm } from 'node:fs/promises';
+import { mkdir, readdir, rm } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -146,12 +146,28 @@ async function waitForSignInLink(server, after, timeoutMs = 30_000) {
   throw new Error(`No sign-in link appeared in the app's output:\n${server.redacted()}`);
 }
 
-/** Runs the daily cron once, as Vercel Cron would: it records the rules changelog. */
-async function runCron(baseUrl) {
+/**
+ * Runs the daily cron once, as Vercel Cron would. On this fresh database it records the rules added
+ * since the baseline (the 10 M3 states) and queues one email per change for each address with a job in
+ * that state: here the sample account, for its PA, OH, CO and GA jobs, and nobody for the other 6.
+ */
+async function runCron(baseUrl, expectedEmails) {
   const res = await fetch(`${baseUrl}/api/cron/alerts`, { headers: { authorization: `Bearer ${CRON_SECRET}` } });
   const body = await res.json();
   if (!res.ok || !body.ruleChanges?.ok) throw new Error(`The cron run failed: ${res.status} ${JSON.stringify(body)}`);
-  console.log(`cron: ${body.ruleChanges.created} rule changes recorded, ${body.enqueued} alerts queued`);
+  const { created, emailsQueued } = body.ruleChanges;
+  console.log(`cron: ${created} rule changes recorded, ${emailsQueued} rule-change emails queued, ${body.enqueued} alerts queued`);
+  if (emailsQueued !== expectedEmails) throw new Error(`Expected ${expectedEmails} rule-change emails, got ${emailsQueued}`);
+}
+
+/** Removes PNGs in docs/screenshots that this run didn't write, so older views don't pile up. */
+async function pruneOld(written) {
+  for (const file of await readdir(OUT)) {
+    if (file.endsWith('.png') && !written.has(file)) {
+      await rm(join(OUT, file));
+      console.log(`removed docs/screenshots/${file} (no longer produced)`);
+    }
+  }
 }
 
 /** What Stripe sends after someone pays through the Payment Link: a signed checkout.session.completed. */
@@ -192,6 +208,8 @@ async function fillJob(page, job) {
   await page.fill('input[name="lastFurnishDate"]', job.lastFurnishDate ?? '');
 }
 
+const WRITTEN = new Set();
+
 async function shot(page, name, options = {}) {
   await page.evaluate(() => {
     document.activeElement?.blur(); // no focus ring or selected date segment in the picture
@@ -199,6 +217,7 @@ async function shot(page, name, options = {}) {
   });
   const path = join(OUT, `${name}.png`);
   await page.screenshot({ path, ...options });
+  WRITTEN.add(`${name}.png`);
   console.log(`saved docs/screenshots/${name}.png`);
 }
 
@@ -255,9 +274,6 @@ async function main() {
     await waitUntilAnswering(baseUrl, server);
     browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PATH });
 
-    // 0. The first daily cron run on this database records the changes since the baseline rules.
-    await runCron(baseUrl);
-
     // 1. A visitor on a desktop: enters the Pennsylvania job, sees its deadlines, saves it with an email.
     const desktop = await browser.newContext(DESKTOP);
     const page = await calculator(desktop, baseUrl, 'desktop');
@@ -284,16 +300,21 @@ async function main() {
       await Promise.all([page.waitForURL(/\/jobs\/[0-9a-f-]{36}$/), page.getByRole('button', { name: 'Save & email me alerts' }).click()]);
     }
 
+    // 5. The first daily cron run on this database records the rules added since the baseline and
+    //    emails the account once for each of its 4 states (PA, OH, CO, GA), not for the other 6.
+    await runCron(baseUrl, 4);
+
     await dashboard(page, baseUrl, 'desktop');
     await changelog(page, baseUrl, 'desktop');
 
-    // 5. The same on a phone, signed in to the same account.
+    // 6. The same on a phone, signed in to the same account.
     const phone = await browser.newContext(PHONE);
     await calculator(phone, baseUrl, 'mobile');
     await phone.addCookies(await desktop.cookies());
     const phonePage = await phone.newPage();
     await dashboard(phonePage, baseUrl, 'mobile');
     await changelog(phonePage, baseUrl, 'mobile');
+    await pruneOld(WRITTEN);
   } finally {
     await browser?.close();
     await stop(server);

@@ -15,7 +15,7 @@ import {
   startSignIn,
   type PendingJob,
 } from '@/lib/auth';
-import { isPaid, jobLimitFor } from '@/lib/billing';
+import { hasOpenSubscription, jobLimitFor } from '@/lib/billing';
 import { isIsoDate, todayIn } from '@/lib/dates';
 import { getDb, type Db } from '@/lib/db';
 import { confirmProposal, createProposal, discardProposal } from '@/lib/inbound';
@@ -115,9 +115,10 @@ export async function finishSignInAction(formData: FormData): Promise<void> {
 export async function deleteAccountAction(formData: FormData): Promise<void> {
   const account = await requireAccount('/jobs');
   // Deleting the account can't stop Stripe from charging, so the subscription must go first.
-  if (isPaid(account.subscriptionStatus)) redirect('/jobs?error=delete-subscribed#account');
+  if (hasOpenSubscription(account.subscriptionStatus)) redirect('/jobs?error=delete-subscribed#account');
   if (text(formData, 'confirm') !== 'yes') redirect('/jobs?error=delete-confirm#account');
-  await deleteAccount(await getDb(), account.id);
+  // deleteAccount checks again in the DELETE itself, for a checkout completing in the meantime.
+  if ((await deleteAccount(await getDb(), account.id)) === 'subscribed') redirect('/jobs?error=delete-subscribed#account');
   await clearSessionCookie();
   redirect('/?accountDeleted=1');
 }
